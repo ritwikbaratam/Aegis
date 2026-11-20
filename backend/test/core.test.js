@@ -287,6 +287,71 @@ test('reports derive data from persisted incident records', () => {
   app.close();
 });
 
+test('report trends count more than 100 incidents without changing role scope', (t) => {
+  let now = Date.parse('2026-11-20T06:00:00Z');
+  const app = setup(true, () => new Date(now));
+  t.after(app.close);
+  const { incidentService, reports } = app.services;
+  const admin = app.admin();
+  const employee = app.employee();
+  const technician = app.technician();
+
+  for (let index = 0; index < 101; index += 1) {
+    incidentService.create(employee, { ...paymentReport, title: `Trend regression incident ${index}` });
+  }
+  now += 86_400_000;
+  incidentService.create(admin, paymentReport);
+
+  assert.deepEqual(reports.trends(admin), [
+    { date: '2026-11-20', value: 105 }, { date: '2026-11-21', value: 1 },
+  ]);
+  assert.deepEqual(reports.trends(employee), [{ date: '2026-11-20', value: 105 }]);
+  const assignedTrend = reports.overview(technician).trend;
+  assert.ok(assignedTrend.length > 0);
+  assert.deepEqual(reports.trends(technician), assignedTrend);
+});
+
+for (const [resource, recordKey, existingName, attributes] of [
+  ['services', 'service', 'CAMPUS NETWORK', { businessCriticality: 2 }],
+  ['categories', 'category', 'NETWORK', { keywords: ['regression'] }],
+]) {
+  test(`duplicate ${resource} return HTTP 409 on create and rename`, async (t) => {
+    const app = createApplication({ databasePath: ':memory:', seed: true });
+    const server = http.createServer(app.handler);
+    await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+    t.after(async () => {
+      await new Promise((resolve) => server.close(resolve));
+      app.close();
+    });
+    const { token } = app.services.auth.login('admin@aegis.local', 'Admin@12345');
+    const endpoint = `http://127.0.0.1:${server.address().port}/api/admin/${resource}`;
+    const request = (method, body, id = '') => fetch(endpoint + id, {
+      method,
+      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+      body: body && JSON.stringify(body),
+    });
+    const newName = `Duplicate-name regression ${recordKey}`;
+    const created = await request('POST', { ...attributes, name: newName });
+    assert.equal(created.status, 201);
+    const { id } = (await created.json())[recordKey];
+    const before = await (await request('GET')).json();
+    const initialAuditCount = app.database.value('SELECT COUNT(*) FROM audit_events');
+
+    for (const [method, suffix] of [['POST', ''], ['PATCH', `/${id}`]]) {
+      const response = await request(method, { ...attributes, name: existingName }, suffix);
+      assert.equal(response.status, 409);
+      const error = await response.json();
+      assert.equal(error.error, 'CONFLICT');
+      assert.match(error.message, new RegExp(`${recordKey} with that name already exists`, 'i'));
+    }
+    assert.deepEqual(await (await request('GET')).json(), before);
+    assert.equal(app.database.value('SELECT COUNT(*) FROM audit_events'), initialAuditCount);
+    const unchangedName = await request('PATCH', { ...attributes, name: newName }, `/${id}`);
+    assert.equal(unchangedName.status, 200);
+    assert.equal((await unchangedName.json())[recordKey].name, newName);
+  });
+}
+
 test('closed incident accepts one feedback submission only', () => {
   const app = setup();
   const incident = seededIncident(app, 'Scheduled database backup failure');

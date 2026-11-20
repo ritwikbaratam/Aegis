@@ -45,6 +45,15 @@ const requireText = (value, name, min = 1, max = 5000) => {
   if (text.length < min || text.length > max) throw new ValidationError(`${name} must contain ${min}-${max} characters`);
   return text;
 };
+const writeWithUniqueName = (write, conflictMessage) => {
+  try {
+    return write();
+  } catch (error) {
+    // SQLITE_CONSTRAINT_UNIQUE, including case-insensitive name collisions.
+    if (error.code === 'ERR_SQLITE_ERROR' && error.errcode === 2067) throw new ConflictError(conflictMessage);
+    throw error;
+  }
+};
 const utcDateBounds = ({ from, to }) => {
   const parseBound = (value, time) => {
     if (value == null || value === '') return undefined;
@@ -330,8 +339,8 @@ export class IncidentService {
     return 'ON_TRACK';
   }
 
-  summary(row) {
-    const risk = this.riskPredictor.assess(row, this.clock());
+  summary(row, now = this.clock()) {
+    const risk = this.riskPredictor.assess(row, now);
     return {
       id: row.id, incidentCode: row.incident_code, title: row.title, description: row.description,
       status: row.status, priority: row.priority, priorityScore: row.priority_score,
@@ -344,7 +353,7 @@ export class IncidentService {
         responseDeadline: row.response_deadline, resolutionDeadline: row.resolution_deadline,
         responseMinutes: row.response_minutes, resolutionMinutes: row.resolution_minutes,
         responseBreached: Boolean(row.response_breached), resolutionBreached: Boolean(row.resolution_breached),
-        status: this.slaStatus(row), risk,
+        status: this.slaStatus(row, now), risk,
       },
     };
   }
@@ -392,7 +401,9 @@ export class IncidentService {
       WHERE i.id=:id OR i.incident_code=:id`, { id: String(id) });
     if (!row) throw new NotFoundError('Incident');
     if (actor && !skipAuthorisation) this.assertCanView(actor, row);
-    const incident = this.summary(row);
+    const now = this.clock();
+    const incident = this.summary(row, now);
+    incident.sla.evaluatedAt = now.toISOString();
     const priorityExplanation = parseJson(row.priority_explanation, {});
     const assignments = this.db.all(`SELECT ia.*, u.name AS technician_name, u.email AS technician_email, by_user.name AS assigned_by_name
       FROM incident_assignments ia LEFT JOIN users u ON u.id=ia.technician_id LEFT JOIN users by_user ON by_user.id=ia.assigned_by
@@ -784,12 +795,15 @@ export class AdminService {
     const criticality = Number(input.businessCriticality);
     if (!Number.isInteger(criticality) || criticality < 1 || criticality > 3) throw new ValidationError('Business criticality must be 1 to 3');
     const active = input.active === undefined ? 1 : asBool(input.active) ? 1 : 0;
+    const conflictMessage = 'An IT service with that name already exists';
     if (id) {
       const existing = this.db.get('SELECT * FROM it_services WHERE id=:id', { id: toId(id,'Service') }); if (!existing) throw new NotFoundError('Service');
-      this.db.run('UPDATE it_services SET name=:name,description=:description,business_criticality=:criticality,active=:active WHERE id=:id', { id: existing.id,name,description,criticality,active });
+      writeWithUniqueName(() => this.db.run('UPDATE it_services SET name=:name,description=:description,business_criticality=:criticality,active=:active WHERE id=:id',
+        { id: existing.id,name,description,criticality,active }), conflictMessage);
       this.audit.record({ actor, action:'SERVICE_UPDATED', description:`Service ${name} was updated.` }); return { id: existing.id,name,description,businessCriticality:criticality,active:Boolean(active) };
     }
-    const serviceId = this.incidents.insert('it_services', { name,description,business_criticality:criticality,active,created_at:nowIso(this.clock) });
+    const serviceId = writeWithUniqueName(() => this.incidents.insert('it_services',
+      { name,description,business_criticality:criticality,active,created_at:nowIso(this.clock) }), conflictMessage);
     this.audit.record({ actor,action:'SERVICE_CREATED',description:`Service ${name} was created.` }); return { id:serviceId,name,description,businessCriticality:criticality,active:Boolean(active) };
   }
 
@@ -797,8 +811,19 @@ export class AdminService {
   upsertCategory(actor, id, input) {
     this.guard(actor);
     const name=requireText(input.name,'Category name',2,80); const keywords=Array.isArray(input.keywords)?input.keywords.map((keyword)=>String(keyword).trim().toLowerCase()).filter(Boolean).slice(0,30):[]; const active=input.active===undefined?1:asBool(input.active)?1:0;
-    if(id){ const existing=this.db.get('SELECT * FROM categories WHERE id=:id',{id:toId(id,'Category')}); if(!existing) throw new NotFoundError('Category'); this.db.run('UPDATE categories SET name=:name,keywords=:keywords,active=:active WHERE id=:id',{id:existing.id,name,keywords:JSON.stringify(keywords),active}); this.audit.record({actor,action:'CATEGORY_UPDATED',description:`Category ${name} was updated.`}); return {id:existing.id,name,keywords,active:Boolean(active)}; }
-    const categoryId=this.incidents.insert('categories',{name,keywords:JSON.stringify(keywords),active,created_at:nowIso(this.clock)});this.audit.record({actor,action:'CATEGORY_CREATED',description:`Category ${name} was created.`});return {id:categoryId,name,keywords,active:Boolean(active)};
+    const conflictMessage = 'A category with that name already exists';
+    if (id) {
+      const existing = this.db.get('SELECT * FROM categories WHERE id=:id', { id: toId(id, 'Category') });
+      if (!existing) throw new NotFoundError('Category');
+      writeWithUniqueName(() => this.db.run('UPDATE categories SET name=:name,keywords=:keywords,active=:active WHERE id=:id',
+        { id: existing.id, name, keywords: JSON.stringify(keywords), active }), conflictMessage);
+      this.audit.record({ actor, action: 'CATEGORY_UPDATED', description: `Category ${name} was updated.` });
+      return { id: existing.id, name, keywords, active: Boolean(active) };
+    }
+    const categoryId = writeWithUniqueName(() => this.incidents.insert('categories',
+      { name, keywords: JSON.stringify(keywords), active, created_at: nowIso(this.clock) }), conflictMessage);
+    this.audit.record({ actor, action: 'CATEGORY_CREATED', description: `Category ${name} was created.` });
+    return { id: categoryId, name, keywords, active: Boolean(active) };
   }
 
   slaPolicies(actor) { this.guard(actor); return this.db.all("SELECT * FROM sla_policies ORDER BY priority").map((policy)=>({id:policy.id,priority:policy.priority,responseMinutes:policy.response_minutes,resolutionMinutes:policy.resolution_minutes,updatedAt:policy.updated_at})); }
@@ -822,9 +847,9 @@ export class AdminService {
 }
 
 export class ReportService {
-  constructor({ database, users, incidentService, clock = () => new Date() }) { this.db=database;this.users=users;this.incidentService=incidentService;this.clock=clock; }
+  constructor({ database, users, clock = () => new Date() }) { this.db=database;this.users=users;this.clock=clock; }
   guard(actor) { if(!actor) throw new ForbiddenError(); }
-  overview(actor, filters = {}) {
+  incidentScope(actor) {
     this.guard(actor);
     const clauses = [];
     const params = {};
@@ -833,6 +858,10 @@ export class ReportService {
       clauses.push(`i.${owner} = :actorId`);
       params.actorId = actor.id;
     }
+    return { clauses, params };
+  }
+  overview(actor, filters = {}) {
+    const { clauses, params } = this.incidentScope(actor);
     if (filters.category) {
       clauses.push('i.category_id = :categoryId');
       params.categoryId = toId(filters.category, 'Category');
@@ -875,7 +904,12 @@ export class ReportService {
   groupRows(rows,key) { const counts={};rows.forEach((row)=>{counts[row[key]]=(counts[row[key]]??0)+1;});return Object.entries(counts).map(([name,value])=>({name,value})); }
   workload(actor) { if(actor.role===Roles.EMPLOYEE) throw new ForbiddenError('Workload reporting is restricted');return this.users.technicians().map((tech)=>({id:tech.id,name:tech.name,available:Boolean(tech.available),capacity:tech.capacity,activeWorkload:Number(tech.active_workload),utilisation:tech.capacity?Math.round(Number(tech.active_workload)/tech.capacity*100):0,skills:parseJson(tech.skills,[])})); }
   services(actor) { if(actor.role===Roles.EMPLOYEE) throw new ForbiddenError('Service reporting is restricted');return this.db.all(`SELECT s.id,s.name,COUNT(i.id) AS total,COUNT(CASE WHEN i.status NOT IN ('RESOLVED','VERIFIED','CLOSED') THEN 1 END) AS active,COUNT(CASE WHEN i.response_breached=1 OR i.resolution_breached=1 THEN 1 END) AS breaches FROM it_services s LEFT JOIN incidents i ON i.service_id=s.id GROUP BY s.id ORDER BY total DESC,s.name`).map((row)=>({id:row.id,name:row.name,total:Number(row.total),active:Number(row.active),breaches:Number(row.breaches)})); }
-  trends(actor) { this.guard(actor);const list=this.incidentService.list(actor,{pageSize:1000}).items;const grouped={};list.forEach((incident)=>{const date=incident.createdAt.slice(0,10);grouped[date]=(grouped[date]??0)+1;});return Object.entries(grouped).sort(([a],[b])=>a.localeCompare(b)).map(([date,value])=>({date,value})); }
+  trends(actor) {
+    const { clauses, params } = this.incidentScope(actor);
+    const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
+    return this.db.all(`SELECT substr(i.created_at, 1, 10) AS date, COUNT(*) AS value
+      FROM incidents i ${where} GROUP BY date ORDER BY date`, params).map(({ date, value }) => ({ date, value }));
+  }
   csv(actor) { const report=this.overview(actor);const records=[['Metric','Value'],...Object.entries({Total:report.totalIncidents,Active:report.activeIncidents,Resolved:report.resolvedIncidents,Closed:report.closedIncidents,Critical:report.criticalIncidents,'SLA violations':report.slaViolations,'SLA compliance %':report.slaComplianceRate}).map(([name,value])=>[name,value])];return records.map((row)=>row.map((value)=>`"${String(value).replaceAll('"','""')}"`).join(',')).join('\n'); }
 }
 
@@ -885,7 +919,7 @@ export function createServices({ database, clock = () => new Date() }) {
   const auth=new AuthService(database,users,audit,clock);
   const incidentService=new IncidentService({database,users,incidents,audit,publisher,clock});
   const admin=new AdminService({database,users,incidents,audit,incidentService,auth,clock});
-  const reports=new ReportService({database,users,incidentService,clock});
+  const reports=new ReportService({database,users,clock});
   return { users,incidents,audit,publisher,auth,incidentService,admin,reports };
 }
 

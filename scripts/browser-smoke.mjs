@@ -100,6 +100,9 @@ try {
   const employee = await newPage();
   await signIn(employee, 'employee@aegis.local', 'Employee@12345');
   await employee.goto(url + '/#/incidents/new');
+  const titleInput = employee.getByLabel('Short incident title');
+  await titleInput.fill('A'.repeat(161));
+  assert.equal((await titleInput.inputValue()).length, 160);
   await employee.getByLabel('Short incident title').fill('Payment application unavailable');
   await employee.getByLabel('Detailed description').fill('Payment transactions are failing for students and staff. The payment application is unavailable.');
   await employee.getByRole('button', { name: 'Suggest category' }).click();
@@ -149,6 +152,7 @@ try {
   await perform(employee, 'close');
   await perform(employee, 'feedback', { rating: '5', comment: 'Quick response and clear communication.' });
   await employee.locator('.incident-hero').getByText('CLOSED', { exact: true }).waitFor();
+  assert.equal(await employee.locator('[data-sla-end]').textContent(), 'Resolved');
   console.log('PASS browser workflow 2: acknowledgement, investigation, information request, reply, resolution, verification, closure and feedback');
 
   const admin = await newPage();
@@ -194,6 +198,42 @@ try {
 
   const { auth, incidentService } = app.services;
   const reporter = auth.login('admin@aegis.local', 'Admin@12345').user;
+  const userEmail = 'edit-regression@example.test';
+  const disabledUser = app.services.admin.createUser(reporter, {
+    name: 'Disabled user fixture', email: userEmail, password: 'RegressionDemo@123',
+  });
+  const setAccountActive = (active) => app.services.admin.updateUser(reporter, disabledUser.id, { active });
+  setAccountActive(false);
+  await admin.goto(url + '/#/admin/users');
+  const editUser = (name) => admin.getByRole('row', { name: new RegExp(name) }).getByRole('button', { name: 'Edit' }).click();
+  const editor = admin.getByRole('dialog');
+  await editUser('Disabled user fixture');
+  assert.equal(await editor.locator('[name=active]').inputValue(), 'false');
+  assert.deepEqual(await editor.locator('input[readonly]').evaluateAll((inputs) => inputs.map((input) => input.value)), [userEmail, 'Employee']);
+  assert.equal(await editor.locator('[name=email], [name=role]').count(), 0);
+  await editor.locator('[name=name]').fill('Renamed disabled user');
+  await editor.getByRole('button', { name: 'Save changes' }).click();
+  await editor.waitFor({ state: 'detached' });
+  assert.equal(app.services.users.byId(disabledUser.id).name, 'Renamed disabled user');
+  assert.equal(app.services.users.byId(disabledUser.id).active, 0);
+  await editUser('Renamed disabled user');
+  await editor.locator('[name=active]').selectOption('true');
+  await editor.getByRole('button', { name: 'Save changes' }).click();
+  await editor.waitFor({ state: 'detached' });
+  assert.equal(app.services.users.byId(disabledUser.id).active, 1);
+  await editUser('Renamed disabled user');
+  setAccountActive(false);
+  await editor.locator('[name=name]').fill('Renamed after deactivation');
+  await editor.getByRole('button', { name: 'Save changes' }).click();
+  await editor.waitFor({ state: 'detached' });
+  assert.equal(app.services.users.byId(disabledUser.id).active, 0);
+  await admin.goto(url + '/#/admin/categories');
+  await admin.getByRole('row', { name: /Authentication/ }).getByRole('button', { name: 'Edit' }).click();
+  await editor.waitFor();
+  assert.equal(await editor.locator('[name=description]').count(), 0);
+  await editor.getByRole('button', { name: 'Cancel' }).click();
+  console.log('PASS user edits preserve account status and unsupported fields cannot be edited');
+
   const createPaymentIncident = (title) => incidentService.create(reporter, {
     title, description: 'Payment application is not processing test transactions.',
     serviceId: 1, categoryId: 4, impact: 3, urgency: 3, affectedUsers: 650,
@@ -215,6 +255,8 @@ try {
   await admin.goto(url + '/#/incidents');
   await admin.locator('tr[data-incident-link]').first().waitFor();
   const slaFilter = admin.locator('#filter-sla');
+  assert.equal(await admin.locator('#incident-search').getAttribute('placeholder'), 'Search title, description, or incident ID…');
+  console.log('PASS incident form enforces 160-character titles and search names supported fields');
   const search = admin.getByRole('button', { name: 'Search', exact: true });
   for (const [value, label] of [
     ['ON_TRACK', 'On track'], ['MET', 'Met'], ['AT_RISK', 'At risk'],
@@ -338,6 +380,18 @@ try {
   await admin.evaluate(() => window.bitsAppearance.set({ theme: 'light' }));
   await capture(admin, 'bits-sla-rescue-mobile.png');
   console.log('PASS SLA Rescue authorization, snapshot deadline, countdown, reminders and mobile queue');
+
+  await tech.clock.setFixedTime(new Date(now + 2 * 60 * 60_000));
+  await tech.goto(`${url}/#/incidents/${newPayment.id}`);
+  const detailClock = tech.locator('[data-sla-end]');
+  await detailClock.waitFor();
+  const remaining = Math.floor((Date.parse(newPayment.sla.resolutionDeadline) - now) / 1000);
+  const countdownText = await detailClock.textContent();
+  const parts = countdownText.match(/^(\d+)m (\d+)s left$/);
+  assert.ok(parts, `Expected server-relative time remaining, received "${countdownText}"`);
+  assert.ok(Math.abs(Number(parts[1]) * 60 + Number(parts[2]) - remaining) <= 3);
+  await tech.waitForFunction((initial) => document.querySelector('[data-sla-end]')?.textContent !== initial, countdownText);
+  console.log('PASS incident detail countdown uses server time despite browser clock skew');
 
   await employee.goto(url + '/#/dashboard');
   await employee.locator('.metric').first().waitFor();
