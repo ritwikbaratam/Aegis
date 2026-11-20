@@ -1,115 +1,146 @@
-# AEGIS - Intelligent Incident Command Center
+# BITS IT Support
 
-AEGIS is a locally runnable IT Service Management (ITSM) and incident-resolution system for the CS F213 / MAC F212 OOP project. It supports the incident journey from **reporting** through **classification, prioritisation, assignment, investigation, resolution, verification, and closure**.
+**Intelligent IT Service Management & Incident Resolution System**
 
-The browser workspace is called **BITS IT Support**. Use the three-dot menu in the header for your profile, appearance settings, the user guide, and sign-out. Appearance preferences are saved in the browser. The profile shows account details and is read-only.
+BITS IT Support helps a university IT team track an incident from report to closure. It classifies reports, calculates priority, assigns technicians, monitors service-level agreement (SLA) deadlines, and gives the reporter a way to verify the resolution. **AEGIS** is the repository and internal development name.
 
-The application is deliberately local-first: a Node.js 24 server, a persistent SQLite database, and a responsive browser UI. It does not need API keys, Docker, or a cloud account.
+Built for the Object-Oriented Programming course (CS F213 / MAC F212) at **BITS Pilani, Hyderabad Campus**, Semester I, 2026–2027.
 
-## Core capabilities
+## Project preview
 
-- Separate employee, technician, and administrator experiences with server-side role checks.
-- Persistent registration, opaque session login, salted scrypt password hashing, and protected APIs.
-- Incident lifecycle rules, explainable deterministic priority scoring, configurable priority-to-SLA policies, and response/resolution monitoring.
-- Interchangeable skill-based and least-loaded technician assignment strategies.
-- Persistent in-app notifications and a simulated email outbox driven by domain events.
-- Audit timeline, duplicate incident suggestions, rule-based category suggestions, SLA risk, escalations, and historical-resolution recommendations.
-- Search/filtering, real database-derived reports, CSV export, administration screens, and Service Pulse dependency awareness.
+![BITS IT Support sign-in screen with the BITS emblem and Hyderabad campus library photograph](docs/screenshots/login.jpg)
 
-## Prerequisites
+<details>
+<summary>View dashboards, Smart Fix Suggestions, and SLA Rescue</summary>
 
-- Windows, macOS, or Linux
-- Node.js **24 or newer** (`node --version`)
+| Employee dashboard | Technician dashboard |
+| --- | --- |
+| ![Employee dashboard with support requests and recent activity](docs/screenshots/employee-dashboard.jpg) | ![Technician dashboard with assigned incidents and workload](docs/screenshots/technician-dashboard.jpg) |
 
-No `npm install` is required for the self-contained implementation. Node 24 supplies the HTTP, crypto, test, and SQLite modules used by AEGIS.
+| Administrator dashboard | SLA Rescue |
+| --- | --- |
+| ![Administrator dashboard with incident and SLA metrics](docs/screenshots/administrator-dashboard.jpg) | ![SLA Rescue queue showing overdue and priority incidents](docs/screenshots/sla-rescue.jpg) |
 
-## Launch on Windows / VS Code
+**Smart Fix Suggestions**
 
-Open the repository folder in VS Code and run:
+![Incident detail showing a historical resolution, similarity score, and match explanation](docs/screenshots/smart-fix-suggestions.jpg)
 
-```powershell
-./scripts/start.ps1
+</details>
+
+Screenshots use fictional incidents and accounts from an isolated demo.
+
+## Key capabilities
+
+| Workspace | What it supports |
+| --- | --- |
+| Employee | Sign in, report incidents, track progress, reply to support, verify resolutions, close requests, and leave feedback. |
+| Technician | Review the assigned queue and current workload, acknowledge and investigate incidents, request information, record resolutions, and consult historical fixes. |
+| Administrator | Oversee incidents, manage users, technicians, services, and categories, configure SLA policies and assignment strategies, review audit history, and export filtered reports as CSV. |
+| System automation | Calculate priority from impact, urgency, service criticality, and affected-user count. Suggest categories from keywords and flag potential duplicates. Assign work by skills or workload. Record SLA warnings, breaches, and escalations, with in-app and simulated email notifications. |
+
+## Intelligent features
+
+### Smart Fix Suggestions
+
+The **Related & knowledge** tab ranks relevant historical resolutions the viewer is authorized to access. It normalizes terms such as *Wi-Fi* and *wireless*, compares symptoms and phrases, and considers the affected service, category, and wording of past fixes. Each result includes a similarity score and an explanation. When no match qualifies, the tab offers clearly labelled curated troubleshooting guidance. The recommendation system uses deterministic rules and runs entirely locally.
+
+### SLA Rescue
+
+Administrators get a risk-ordered queue of active incidents, with server-based countdowns, explanations, and suggested next steps. A pending target enters the warning window in the final 20% of its SLA and becomes overdue once the deadline passes. Authorized reminders reuse the audit trail and both notification channels. Each incident, SLA target, and assigned technician combination receives at most one manual reminder. The existing SLA monitor records breaches and escalations.
+
+## Technology and architecture
+
+The browser single-page application uses **JavaScript, HTML5, and CSS3**. **Node.js 24** serves the frontend and HTTP API. **SQLite** provides file-backed storage through the built-in `node:sqlite` module. The runtime uses only built-in Node modules.
+
+```text
+Browser SPA → HTTP API → Application services
+                              ├─ Domain policies
+                              └─ Repositories → SQLite
 ```
 
-Or launch directly:
+The [HTTP controller](backend/src/server.js) authenticates requests and calls [application services](backend/src/services.js). Services coordinate workflows, use [domain policies](backend/src/domain.js) to enforce rules, and persist records through the [database layer](backend/src/database.js). This separation lets tests exercise business decisions independently of the browser.
 
-```powershell
+## Object-oriented design
+
+`AuthService` encapsulates password and session handling. `IncidentService` abstracts incident operations and composes lifecycle, assignment, audit, and notification collaborators. Inheritance shares behavior across strategies and repositories. Polymorphism lets the service call either assignment implementation through the same `assign` method. SQLite foreign keys associate incidents with reporters, technicians, services, categories, and audit records.
+
+| Pattern | Implementation and benefit |
+| --- | --- |
+| Strategy | `TechnicianAssignmentStrategy` defines the `assign` contract. `SkillBasedAssignmentStrategy` and `LeastLoadedAssignmentStrategy` can be swapped through configuration. |
+| Observer | `EventPublisher` calls `handle(event)` on `InAppNotificationChannel` and `SimulatedEmailNotificationChannel`. Each channel handles delivery independently of the incident workflow. |
+| Factory | `IncidentFactory` builds initial incident data, and `AssignmentStrategyFactory` selects the configured implementation. Both centralize creation rules. |
+| Repository | `UserRepository` and `IncidentRepository` extend `BaseRepository` and encapsulate recurring SQLite queries and inserts. |
+
+See the [OOP design notes](docs/OOP_DESIGN_EXPLAINED.md) and [class diagram](docs/diagrams/CLASS_DIAGRAM.md) for details.
+
+## Getting started
+
+Install **Git** and **Node.js 24 or newer**. The application runs directly from a fresh clone.
+
+```text
+git clone https://github.com/ritwikbaratam/Aegis.git
+cd Aegis
 node backend/src/server.js
 ```
 
-Then open [http://localhost:8080](http://localhost:8080). The server delivers the frontend directly. There is no compilation or bundling step.
+Open [http://localhost:8080](http://localhost:8080). Stop the server with **Ctrl+C**. Startup initializes SQLite at `backend/data/aegis.db` by default. Outside production mode, a database with no users is seeded automatically with fictional accounts and incidents.
 
-On macOS/Linux:
+### Local demo accounts
 
-```bash
-sh ./scripts/start.sh
-```
-
-## Development-only demo accounts
+These credentials are for the seeded local demonstration.
 
 | Role | Email | Password |
 | --- | --- | --- |
-| Administrator | `admin@aegis.local` | `Admin@12345` |
 | Employee | `employee@aegis.local` | `Employee@12345` |
-| Technician — applications | `jamie.apps@aegis.local` | `Technician@12345` |
-| Technician — network | `alex.network@aegis.local` | `Technician@12345` |
+| Technician, applications | `jamie.apps@aegis.local` | `Technician@12345` |
+| Technician, network | `alex.network@aegis.local` | `Technician@12345` |
+| Administrator | `admin@aegis.local` | `Admin@12345` |
 
-These are intentionally seeded local demonstration accounts, not production credentials.
+## Testing and verification
 
-## Test and quality commands
+Verified at `82a026b` on Node.js 24.18.0.
+
+| Check | Result |
+| --- | --- |
+| Backend tests | **56 passed**, 0 failed, 0 skipped |
+| Microsoft Edge smoke tests | **17 groups passed** |
+| Syntax checks | Passed |
+| SQLite persistence | An incident and its audit history survived a separate Node process reopening an isolated database |
+
+Coverage includes authentication and role permissions, the incident lifecycle, assignment, priority, SLA monitoring, Smart Fix, notifications, audit history, and responsive UI behavior.
+
+From the repository root in PowerShell, run the backend and syntax checks. In other shells, use `npm run check` for the syntax check.
 
 ```powershell
 node --test backend/test
 npm.cmd run check
 ```
 
-See [test cases](docs/testing/TEST_CASES.md), [test results](docs/testing/TEST_RESULTS.md), and [project status](docs/PROJECT_STATUS.md). Test-result status is updated only after the corresponding command runs.
-
-## Reset demo data
-
-Start with a new database path to get a fresh demo while keeping your existing records:
+For browser checks, install Microsoft Edge and place Playwright Core in a temporary directory. The smoke script starts its own server and uses an isolated in-memory database.
 
 ```powershell
-$env:AEGIS_DATABASE_PATH = "backend/data/rehearsal.db"
-node backend/src/server.js
+$qa = Join-Path $env:TEMP 'aegis-qa-tools'
+npm.cmd install --prefix "$qa" playwright-core
+$env:AEGIS_PLAYWRIGHT_MODULE = ([uri]::new((Join-Path $qa 'node_modules/playwright-core/index.mjs'))).AbsoluteUri
+node scripts/browser-smoke.mjs
 ```
 
-After stopping the server, use `Remove-Item Env:AEGIS_DATABASE_PATH` to return to the default database. Demo seeding is disabled when `NODE_ENV=production`.
+## Security and limitations
 
-The optional browser smoke script uses Playwright Core and an installed Microsoft Edge. These are only needed for browser QA. See [verification instructions](docs/testing/TEST_RESULTS.md).
+Passwords use salted scrypt hashes. Opaque bearer sessions expire and can be revoked through sign-out. The server validates input, enforces role and incident access, and records workflow actions in an audit trail.
 
-## Project map
+This prototype runs locally. Email is simulated in a local outbox, SLA targets use continuous calendar time, and browser verification covers Microsoft Edge.
 
-```text
-frontend/            Browser SPA: UI, routing, accessibility, API client
-backend/src/          HTTP controllers, domain services, SQLite repositories
-backend/test/         Automated Node test suite
-backend/data/         Ignored local SQLite runtime database
-docs/                 Requirements, architecture, OOP, diagrams, tests, report, demo
-scripts/              Cross-platform start scripts
-```
+## Documentation
 
-## Architecture at a glance
+| Topic | References |
+| --- | --- |
+| Course specification and requirements | [Project specification](docs/reference/OOP_S1_2026-2027_Project.pdf) · [Requirements](docs/requirements/REQUIREMENTS.md) · [Compliance matrix](docs/requirements/COMPLIANCE_MATRIX.md) |
+| Architecture and design | [Architecture](docs/architecture/ARCHITECTURE.md) · [OOP design](docs/OOP_DESIGN_EXPLAINED.md) |
+| Diagrams and persistence | [Use case](docs/diagrams/USE_CASE_DIAGRAM.md) · [Class](docs/diagrams/CLASS_DIAGRAM.md) · [Sequence](docs/diagrams/INCIDENT_SEQUENCE.md) · [ER diagram](docs/diagrams/ER_DIAGRAM.md) · [Database schema](docs/database/SCHEMA.md) |
+| Verification | [Test cases](docs/testing/TEST_CASES.md) · [Earlier verification and restart evidence](docs/testing/TEST_RESULTS.md) |
+| Demonstration | [Demo script](docs/demo/DEMO_SCRIPT.md) |
 
-`Browser UI -> REST controllers -> application services -> repositories -> SQLite`
+## Academic team
 
-The class-based design uses `PriorityCalculator`, `TechnicianAssignmentStrategy` and its two implementations, `IncidentLifecycle`, `EventPublisher`, persistent notification channels, repositories, and domain errors.
-
-Read [architecture](docs/architecture/ARCHITECTURE.md), [OOP design](docs/OOP_DESIGN_EXPLAINED.md), and the [beginner-friendly professor guide](docs/EXPLAIN_TO_PROFESSOR.md) before a presentation.
-
-The submission materials include the [PDF report](output/pdf/AEGIS_PROJECT_REPORT.pdf), [requirements matrix](docs/requirements/COMPLIANCE_MATRIX.md), [UML and ER diagrams](docs/diagrams), and [demo script](docs/demo/DEMO_SCRIPT.md).
-
-## Known limitations
-
-- Email is simulated and kept in the administrator-visible local outbox; it never sends external mail.
-- SLA targets use continuous calendar time, not office-hour calendars.
-- Sessions are suitable for a local academic demonstration; a production deployment needs HTTPS-only cookies, CSRF protection tuned to the chosen hosting model, rate limiting, secret management, monitoring, backups, and an enterprise identity provider.
-- Reports reflect the local SQLite database only.
-
-## Submission checklist
-
-- [x] Run the automated tests and record the result.
-- [ ] Start the application and rehearse all three workflows in `docs/demo/DEMO_SCRIPT.md`.
-- [ ] Review the requirements matrix and disclose any partial item.
-- [ ] Replace team-member placeholders in the demo material.
-- [ ] Record the required presentation separately; no video is included in this repository.
+**Contributors** — Team member names pending confirmation.
