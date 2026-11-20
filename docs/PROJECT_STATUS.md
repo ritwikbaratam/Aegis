@@ -10,11 +10,19 @@
 
 ## Verification
 
-- Node: 30 passed, 0 failed, 0 skipped.
-- Edge: Three end-to-end workflows plus mobile navigation, no browser exception or HTTP 5xx observed.
+- Node: 42 passed, 0 failed, 0 skipped, including the original 30 tests.
+- Edge: Six checks passed, covering the original workflows and mobile checks plus administrator-owned verification and SLA filtering.
 - Startup: health endpoint responded with SQLite active and four seeded incidents.
 - Persistence: newly created incident, assignment and audit survived reopening in a separate Node process.
 - PDF: all five printed pages rendered and visually inspected.
+
+## Phase 2 fixes
+
+- Acknowledgements after the response deadline record a breach through the existing audit, notification and reporting paths. The existing breach guard prevents duplicates. An acknowledgement at the deadline is on time.
+- Administrators can verify an incident they reported. The state machine still requires resolution before verification and verification before closure.
+- The incident register uses the four backend SLA status values. Incident and report date filters share UTC calendar-date validation.
+- Category suggestions match complete words and contiguous phrases, with Wi-Fi normalized to the configured `wifi` keyword.
+- An isolated two-process restart preserved the tested incident's closure status, resolution, verification and closure audit entries, and its single response breach.
 
 ## Boundaries
 

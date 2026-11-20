@@ -6,7 +6,8 @@ import path from 'node:path';
 import { createApplication } from '../backend/src/server.js';
 
 const { chromium } = await import(process.env.AEGIS_PLAYWRIGHT_MODULE ?? 'playwright-core');
-const app = createApplication({ databasePath: ':memory:' });
+let now = Date.now();
+const app = createApplication({ databasePath: ':memory:', clock: () => new Date(now) });
 const server = http.createServer(app.handler);
 server.listen(0, '127.0.0.1');
 await once(server, 'listening');
@@ -78,8 +79,9 @@ try {
   await employee.getByText(/Similarity \d+%/).waitFor();
   await employee.getByRole('tab', { name: 'Activity timeline' }).click();
   await employee.getByText('Reporter linked a potential duplicate.').waitFor();
+  const createdIncidentCode = await employee.locator('.incident-id').textContent();
   await employee.goto(url + '/#/notifications');
-  const createdNotice = employee.getByRole('button', { name: /was created/ }).first();
+  const createdNotice = employee.getByRole('button', { name: new RegExp(`${createdIncidentCode} was created`) });
   await createdNotice.click();
   await employee.waitForURL(detail);
   console.log('PASS browser workflow 1: critical report, category, duplicate link, assignment and audit');
@@ -143,6 +145,51 @@ try {
   await admin.getByRole('button', { name: /Export incident CSV/ }).click();
   assert.match((await download).suggestedFilename(), /^aegis-incidents-.*\.csv$/);
   console.log('PASS browser workflow 3: SLA policy, technician settings, strategy, escalations, email, reports and CSV');
+
+  const { auth, incidentService } = app.services;
+  const reporter = auth.login('admin@aegis.local', 'Admin@12345').user;
+  const createPaymentIncident = (title) => incidentService.create(reporter, {
+    title, description: 'Payment application is not processing test transactions.',
+    serviceId: 1, categoryId: 4, impact: 3, urgency: 3, affectedUsers: 650,
+  }).incident;
+  const owned = createPaymentIncident('Administrator verification fixture');
+  const assignee = auth.login(owned.assignedTechnician.email, 'Technician@12345').user;
+  incidentService.acknowledge(assignee, owned.id);
+  incidentService.startInvestigation(assignee, owned.id);
+  incidentService.resolve(assignee, owned.id, { resolution: 'Restored the test payment application.' });
+  await admin.goto(`${url}/#/incidents/${owned.id}`);
+  await perform(admin, 'verify', { note: 'Confirmed as the reporter.' });
+  await perform(admin, 'close');
+  await admin.locator('.incident-hero').getByText('CLOSED', { exact: true }).waitFor();
+  console.log('PASS browser regression: original administrator reporter can verify and close');
+
+  const atRisk = createPaymentIncident('SLA at-risk filter fixture');
+  now = Date.parse(atRisk.sla.responseDeadline) - 1000;
+  createPaymentIncident('SLA on-track filter fixture');
+  await admin.goto(url + '/#/incidents');
+  await admin.locator('tr[data-incident-link]').first().waitFor();
+  const slaFilter = admin.locator('#filter-sla');
+  const search = admin.getByRole('button', { name: 'Search', exact: true });
+  for (const [value, label] of [
+    ['ON_TRACK', 'On track'], ['MET', 'Met'], ['AT_RISK', 'At risk'],
+    ['BREACHED', 'Breached'], ['', 'Any SLA status'],
+  ]) {
+    const expected = incidentService.list(reporter, { slaStatus: value }).items.map(({ id }) => id);
+    assert.ok(expected.length > 0, `expected seeded results for ${label}`);
+    assert.deepEqual(await slaFilter.selectOption({ label }), [value]);
+    await search.click();
+    await admin.waitForURL((current) => (new URLSearchParams(current.hash.split('?')[1]).get('slaStatus') ?? '') === value);
+    await admin.waitForFunction((ids) => {
+      const actual = [...document.querySelectorAll('tr[data-incident-link]')].map((row) => Number(row.dataset.incidentLink));
+      return JSON.stringify(actual) === JSON.stringify(ids);
+    }, expected);
+    assert.equal(await slaFilter.inputValue(), value);
+  }
+  await slaFilter.selectOption('AT_RISK');
+  await admin.locator('#incident-search').fill('no incident has this Phase 2 test title');
+  await search.click();
+  await admin.getByRole('heading', { name: 'No incidents match these filters' }).waitFor();
+  console.log('PASS browser regression: all four SLA states, unfiltered results and empty results');
 
   const mobile = await newPage({ viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true });
   await signIn(mobile, 'employee@aegis.local', 'Employee@12345');

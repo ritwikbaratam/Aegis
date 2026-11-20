@@ -219,12 +219,15 @@ export class IncidentLifecycle {
   }
 }
 
+// Treat the common Wi-Fi spelling as the configured "wifi" keyword.
+const normalizeCategoryText = (value) => normaliseText(value).replace(/\bwi fi\b/g, 'wifi');
+
 export class CategorySuggester {
   suggest(text, categories) {
-    const tokens = new Set(normaliseText(text).split(' ').filter(Boolean));
+    const normalized = ` ${normalizeCategoryText(text)} `;
     const matches = categories.map((category) => {
-      const keywords = parseJson(category.keywords, []).map(normaliseText);
-      const matched = keywords.filter((keyword) => tokens.has(keyword) || [...tokens].some((token) => keyword.includes(token) || token.includes(keyword)));
+      const keywords = [...new Set(parseJson(category.keywords, []).map(normalizeCategoryText).filter(Boolean))];
+      const matched = keywords.filter((keyword) => normalized.includes(` ${keyword} `));
       return { category, matched, score: matched.length / Math.max(keywords.length, 1) };
     }).filter((entry) => entry.matched.length).sort((a, b) => b.score - a.score || b.matched.length - a.matched.length || a.category.name.localeCompare(b.category.name));
     if (!matches.length) return { category: null, confidence: 0, explanation: 'No category keyword matched; choose a category manually.' };

@@ -2,11 +2,14 @@
 
 | Command or check | Observed result |
 | --- | --- |
-| `node --test backend/test` | **30 passed, 0 failed, 0 skipped** on Node 24.18.0. All assertions in `core.test.js` passed. |
+| `node --test backend/test` | **42 passed, 0 failed, 0 skipped** on Node 24.18.0, including 12 Phase 2 regressions. |
 | `npm.cmd run check` | Exit 0. All browser and primary backend JavaScript files passed syntax validation. |
-| Edge smoke automation | All three workflows passed. Critical report, category suggestion, duplicate link, role transfers, request/reply, investigation, resolution, verification, closure, feedback, SLA configuration, technician editing, strategy switching, escalations, outbox, report filters and CSV were exercised. Mobile navigation at 390px passed. No JavaScript exceptions or HTTP 5xx responses were observed. |
+| `node scripts/browser-smoke.mjs` (Edge with Playwright Core) | **Six checks passed.** The three original workflows and mobile navigation passed, along with administrator-owned verification and the four SLA filter states, unfiltered results, and empty results. No JavaScript exceptions or HTTP 5xx responses were observed in the passing run. |
 | Fresh default startup | HTTP 200 from `/api/health`. SQLite contained four seeded incidents with assigned, in-progress, waiting and closed states. |
 | Independent restart check | After one Node process created a file-backed incident, a second process reopened the file and returned the same public code, assignment and audit entries via HTTP. |
+| Phase 2 restart check | A second Node process reopened an isolated SQLite database and confirmed the closed incident, resolution, verification and closure audit entries, and exactly one recorded response breach. |
+
+The Phase 2 backend tests cover acknowledgement before, at, and after the deadline, both monitor orderings, verification ownership and state rules, HTTP date validation, and category word and phrase matching.
 
 ## Repeat the browser smoke check
 

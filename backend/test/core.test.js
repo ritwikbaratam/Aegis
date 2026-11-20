@@ -9,10 +9,10 @@ import { AssignmentStrategyFactory, ConflictError, ForbiddenError, IncidentStatu
 import { createApplication } from '../src/server.js';
 import { createServices, seedDemoData } from '../src/services.js';
 
-function setup(seed = true) {
+function setup(seed = true, clock) {
   const database = new AegisDatabase(':memory:');
-  const services = createServices({ database });
-  if (seed) seedDemoData({ database, services });
+  const services = createServices({ database, clock });
+  if (seed) seedDemoData({ database, services, clock });
   const login = (email, password) => services.auth.actorForToken(services.auth.login(email, password).token);
   return {
     database, services,
@@ -333,4 +333,163 @@ test('HTTP API health, login, and private incident enforcement work together', a
   assert.equal(denied.status, 403);
   await new Promise((resolve) => server.close(resolve));
   app.close();
+});
+
+const acknowledgementCases = [
+  { name: 'before the deadline', offset: -1, expected: 0 },
+  { name: 'exactly at the deadline', offset: 0, expected: 0 },
+  { name: 'after the deadline between monitor runs', offset: 1, expected: 1 },
+  { name: 'after the monitor already recorded a breach', offset: 1, scanBefore: true, expected: 1 },
+  { name: 'followed by the next monitor run', offset: 1, scanAfter: true, expected: 1 },
+];
+
+for (const { name, offset, expected, scanBefore, scanAfter } of acknowledgementCases) {
+  test(`SLA acknowledgement ${name}`, (t) => {
+    let now = Date.parse('2026-11-20T06:00:00Z');
+    const app = setup(true, () => new Date(now));
+    t.after(app.close);
+    const { incidentService, reports } = app.services;
+    const reporter = app.employee();
+    const administrator = app.admin();
+    const baselineViolations = reports.overview(administrator).slaViolations;
+    const { incident } = incidentService.create(reporter, paymentReport);
+    const tech = app.technician(incident.assignedTechnician.email);
+    now = Date.parse(incident.sla.responseDeadline) + offset;
+    if (scanBefore) incidentService.monitorSla();
+    const acknowledged = incidentService.acknowledge(tech, incident.id);
+    if (scanAfter) incidentService.monitorSla();
+
+    assert.equal(acknowledged.acknowledgedAt, new Date(now).toISOString());
+    assert.equal(acknowledged.status, IncidentStatus.ACKNOWLEDGED);
+    assert.equal(acknowledged.sla.responseBreached, Boolean(expected));
+    const params = { id: incident.id };
+    assert.equal(app.database.value("SELECT COUNT(*) FROM sla_breaches WHERE incident_id=:id AND breach_type='RESPONSE'", params), expected);
+    assert.equal(app.database.value("SELECT COUNT(*) FROM audit_events WHERE incident_id=:id AND action_type='SLA_VIOLATION_DETECTED' AND new_value='RESPONSE'", params), expected);
+    const noticeParams = { ...params, recipient: reporter.id };
+    assert.equal(app.database.value("SELECT COUNT(*) FROM notifications WHERE incident_id=:id AND recipient_id=:recipient AND type='SLA_BREACH'", noticeParams), expected);
+    assert.equal(app.database.value("SELECT COUNT(*) FROM simulated_emails WHERE incident_id=:id AND recipient_id=:recipient AND body LIKE 'RESPONSE SLA violation%'", noticeParams), expected);
+    assert.equal(reports.overview(administrator).slaViolations, baselineViolations + expected);
+  });
+}
+
+function reportForVerification(app, reporter, { resolve = true } = {}) {
+  const { incidentService } = app.services;
+  const { incident } = incidentService.create(reporter, paymentReport);
+  if (!resolve) return incident;
+  const technician = app.technician(incident.assignedTechnician.email);
+  incidentService.acknowledge(technician, incident.id);
+  incidentService.startInvestigation(technician, incident.id);
+  return incidentService.resolve(technician, incident.id, { resolution: 'The test payment application was restored.' });
+}
+
+for (const role of ['administrator', 'employee']) {
+  test(`${role} can verify and close their own resolved incident with audit history`, (t) => {
+    const app = setup();
+    t.after(app.close);
+    const reporter = role === 'administrator' ? app.admin() : app.employee();
+    const { incidentService } = app.services;
+    const incident = reportForVerification(app, reporter);
+
+    assert.throws(() => incidentService.close(reporter, incident.id), LifecycleError);
+    const verified = incidentService.verify(reporter, incident.id, { note: 'Confirmed restored.' });
+    assert.equal(verified.status, IncidentStatus.VERIFIED);
+    const closed = incidentService.close(reporter, incident.id);
+    assert.equal(closed.status, IncidentStatus.CLOSED);
+    for (const [action, oldValue, newValue] of [
+      ['RESOLUTION_VERIFIED', IncidentStatus.RESOLVED, IncidentStatus.VERIFIED],
+      ['INCIDENT_CLOSED', IncidentStatus.VERIFIED, IncidentStatus.CLOSED],
+    ]) {
+      const event = closed.audit.find((entry) => entry.action === action);
+      assert.deepEqual([event.actor.id, event.oldValue, event.newValue], [reporter.id, oldValue, newValue]);
+    }
+  });
+
+  test(`${role} cannot verify another reporter's resolved incident`, (t) => {
+    const app = setup();
+    t.after(app.close);
+    const reporter = app.employee();
+    const other = role === 'administrator' ? app.admin() : app.services.auth.createUser({
+      name: 'Other Employee', email: 'other@example.test', password: 'DemoPassword123!',
+    });
+    const { incidentService } = app.services;
+    const incident = reportForVerification(app, reporter);
+
+    assert.throws(() => incidentService.verify(other, incident.id, {}), ForbiddenError);
+    const unchanged = incidentService.get(reporter, incident.id);
+    assert.equal(unchanged.status, IncidentStatus.RESOLVED);
+    assert.ok(!unchanged.audit.some((event) => event.action === 'RESOLUTION_VERIFIED'));
+  });
+}
+
+test('the owning administrator cannot verify before resolution', (t) => {
+  const app = setup();
+  t.after(app.close);
+  const reporter = app.admin();
+  const incident = reportForVerification(app, reporter, { resolve: false });
+  assert.throws(() => app.services.incidentService.verify(reporter, incident.id, {}), LifecycleError);
+});
+
+test('incident date filters validate UTC calendar dates and ranges through HTTP', async (t) => {
+  let now = Date.parse('2026-11-20T00:00:00Z');
+  const app = createApplication({ databasePath: ':memory:', seed: true, clock: () => new Date(now) });
+  const server = http.createServer(app.handler);
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  t.after(async () => {
+    await new Promise((resolve) => server.close(resolve));
+    app.close();
+  });
+  const { user } = app.services.auth.login('admin@aegis.local', 'Admin@12345');
+  const create = () => app.services.incidentService.create(user, paymentReport).incident.id;
+  const first = create();
+  now = Date.parse('2026-11-20T23:59:59.999Z');
+  const last = create();
+  now += 1;
+  const followingDay = create();
+  const { token } = app.services.auth.login('admin@aegis.local', 'Admin@12345');
+  const search = (query = '') => fetch(`http://127.0.0.1:${server.address().port}/api/incidents${query}`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  const all = await search();
+  const empty = await search('?from=&to=');
+  const oneDay = await search('?from=2026-11-20&to=2026-11-20');
+  assert.equal(all.status, 200);
+  assert.equal(empty.status, 200);
+  assert.deepEqual(await empty.json(), await all.json());
+  assert.equal(oneDay.status, 200);
+  const ids = (await oneDay.json()).items.map(({ id }) => id);
+  assert.ok(ids.includes(first) && ids.includes(last) && !ids.includes(followingDay));
+
+  for (const [query, message] of [
+    ['?from=20-11-2026', /YYYY-MM-DD/],
+    ['?to=2026-02-30', /YYYY-MM-DD/],
+    ['?from=2026-11-21&to=2026-11-20', /on or before/],
+  ]) {
+    const response = await search(query);
+    assert.equal(response.status, 400, query);
+    const body = await response.json();
+    assert.deepEqual(Object.keys(body).sort(), ['error', 'message']);
+    assert.equal(body.error, 'VALIDATION_ERROR');
+    assert.match(body.message, message);
+  }
+});
+
+test('category suggestions match meaningful whole words and contiguous phrases', (t) => {
+  const app = setup();
+  t.after(app.close);
+  const suggest = (description) => app.services.incidentService.categorySuggestion(description);
+  for (const description of ['a', 'I am', 'Help!', 'I spilled tea on my notebook', 'The applicationless draft', 'Sign the form and send it in.']) {
+    assert.equal(suggest(description).category, null, description);
+  }
+  for (const [description, category, keyword] of [
+    ['Campus Wi-Fi stopped working', 'Network', 'wifi'],
+    ['The user cannot LOG IN because LOGIN fails', 'Authentication', 'login'],
+    ['Cannot sign-in to the portal', 'Authentication', 'sign in'],
+    ['The application crashes on launch', 'Software/Application', 'application'],
+    ['Network connectivity failed on the first floor', 'Network', 'network'],
+    ['dNs! RoUtEr, and VpN are unreachable.', 'Network', 'dns'],
+  ]) {
+    const result = suggest(description);
+    assert.equal(result.category?.name, category, description);
+    assert.ok(result.matchedKeywords.includes(keyword), description);
+  }
 });

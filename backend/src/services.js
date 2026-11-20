@@ -42,6 +42,23 @@ const requireText = (value, name, min = 1, max = 5000) => {
   if (text.length < min || text.length > max) throw new ValidationError(`${name} must contain ${min}-${max} characters`);
   return text;
 };
+const utcDateBounds = ({ from, to }) => {
+  const parseBound = (value, time) => {
+    if (value == null || value === '') return undefined;
+    if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(value)) {
+      throw new ValidationError('Date filters must be valid YYYY-MM-DD values');
+    }
+    const timestamp = new Date(value + time);
+    if (!Number.isFinite(timestamp.getTime()) || timestamp.toISOString().slice(0, 10) !== value) {
+      throw new ValidationError('Date filters must be valid YYYY-MM-DD values');
+    }
+    return timestamp.toISOString();
+  };
+  const start = parseBound(from, 'T00:00:00.000Z');
+  const end = parseBound(to, 'T23:59:59.999Z');
+  if (start && end && start > end) throw new ValidationError('From date must be on or before the to date');
+  return { from: start, to: end };
+};
 const safeError = (error) => error instanceof DomainError ? error : new DomainError('An unexpected server error occurred', 500, 'INTERNAL_ERROR');
 const tokenHash = (token) => crypto.createHash('sha256').update(token).digest('hex');
 
@@ -350,8 +367,9 @@ export class IncidentService {
     for (const [filter, column] of [['status','i.status'], ['priority','i.priority'], ['category','i.category_id'], ['service','i.service_id'], ['technician','i.assigned_technician_id'], ['reporter','i.reporter_id']]) {
       if (filters[filter]) { conditions.push(`${column}=:${filter}`); params[filter] = filters[filter]; }
     }
-    if (filters.from) { conditions.push('i.created_at >= :from'); params.from = new Date(filters.from).toISOString(); }
-    if (filters.to) { conditions.push('i.created_at <= :to'); params.to = new Date(`${filters.to}T23:59:59.999Z`).toISOString(); }
+    const { from, to } = utcDateBounds(filters);
+    if (from) { conditions.push('i.created_at >= :from'); params.from = from; }
+    if (to) { conditions.push('i.created_at <= :to'); params.to = to; }
     if (filters.slaStatus === 'BREACHED') conditions.push('(i.response_breached=1 OR i.resolution_breached=1)');
     if (filters.slaStatus === 'UNASSIGNED') conditions.push('i.assigned_technician_id IS NULL');
     const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
@@ -474,9 +492,15 @@ export class IncidentService {
     const incident = this.incidents.byId(id);
     if (!incident) throw new NotFoundError('Incident');
     this.assertTechnicianAssignee(actor, incident);
-    const changed = this.recordTransition(incident, actor, IncidentStatus.ACKNOWLEDGED, 'TECHNICIAN_ACKNOWLEDGED', `${actor.name} acknowledged assignment.`, { acknowledged_at: nowIso(this.clock) });
-    this.notify({ recipients: [changed.reporter_id], incidentId: changed.id, type: 'INCIDENT_ACKNOWLEDGED', subject: `${changed.incident_code} acknowledged`, message: `${actor.name} has acknowledged your incident and will investigate it.` });
-    return this.hydrate(changed.id, actor, true);
+    const acknowledgedAt = nowIso(this.clock);
+    return this.db.transaction(() => {
+      const changed = this.recordTransition(incident, actor, IncidentStatus.ACKNOWLEDGED, 'TECHNICIAN_ACKNOWLEDGED', `${actor.name} acknowledged assignment.`, { acknowledged_at: acknowledgedAt });
+      if (Date.parse(acknowledgedAt) > Date.parse(changed.response_deadline)) {
+        this.recordBreach(changed, 'RESPONSE', actor);
+      }
+      this.notify({ recipients: [changed.reporter_id], incidentId: changed.id, type: 'INCIDENT_ACKNOWLEDGED', subject: `${changed.incident_code} acknowledged`, message: `${actor.name} has acknowledged your incident and will investigate it.` });
+      return this.hydrate(changed.id, actor, true);
+    });
   }
 
   startInvestigation(actor, id) {
@@ -547,7 +571,10 @@ export class IncidentService {
   verify(actor, id, input) {
     const incident = this.incidents.byId(id);
     if (!incident) throw new NotFoundError('Incident');
-    this.assertReporter(actor, incident);
+    const adminReporter = this.isAdmin(actor) && Number(actor.id) === Number(incident.reporter_id);
+    if (!adminReporter && !this.isReporter(actor, incident)) {
+      throw new ForbiddenError('Only the original reporter can verify the resolution');
+    }
     const note = String(input.note ?? 'Reporter verified the proposed resolution.').trim().slice(0, 3000);
     const changed = this.recordTransition(incident, actor, IncidentStatus.VERIFIED, 'RESOLUTION_VERIFIED', `${actor.name} verified the resolution.`, { verification_note: note, verified_at: nowIso(this.clock) });
     if (changed.assigned_technician_id) this.notify({ recipients: [changed.assigned_technician_id], incidentId: changed.id, type: 'INCIDENT_VERIFIED', subject: `${changed.incident_code} was verified`, message: note });
@@ -750,17 +777,9 @@ export class ReportService {
       clauses.push('i.category_id = :categoryId');
       params.categoryId = toId(filters.category, 'Category');
     }
-    for (const [key, operator, suffix] of [['from', '>=', 'T00:00:00.000Z'], ['to', '<=', 'T23:59:59.999Z']]) {
-      if (!filters[key]) continue;
-      const value = String(filters[key]);
-      const timestamp = new Date(value + suffix);
-      if (!/^\d{4}-\d{2}-\d{2}$/.test(value) || !Number.isFinite(timestamp.getTime()) || timestamp.toISOString().slice(0, 10) !== value) {
-        throw new ValidationError('Report dates must be valid YYYY-MM-DD values');
-      }
-      clauses.push(`i.created_at ${operator} :${key}`);
-      params[key] = timestamp.toISOString();
-    }
-    if (filters.from && filters.to && filters.from > filters.to) throw new ValidationError('From date must be on or before the to date');
+    const { from, to } = utcDateBounds(filters);
+    if (from) { clauses.push('i.created_at >= :from'); params.from = from; }
+    if (to) { clauses.push('i.created_at <= :to'); params.to = to; }
     const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
     const rows = this.db.all(`SELECT i.* FROM incidents i ${where}`, params);
     const active = rows.filter((row) => ACTIVE_STATUSES.includes(row.status));
