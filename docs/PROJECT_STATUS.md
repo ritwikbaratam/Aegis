@@ -24,8 +24,18 @@
 - Category suggestions match complete words and contiguous phrases, with Wi-Fi normalized to the configured `wifi` keyword.
 - An isolated two-process restart preserved the tested incident's closure status, resolution, verification and closure audit entries, and its single response breach.
 
+## Phase 3
+
+- BITS IT Support uses the supplied BITS Pilani emblem on the sign-in screen, sidebar, About page, favicon, and orbital loader. The reusable wordmark raises the I and T.
+- Dashboard rows separate priority, title, incident ID, service, and status. The header stays in page flow. Cards and forms reflow on narrow screens, with wide tables scrolling inside their panels.
+- The account menu provides a read-only profile, role-specific user guide, About, confirmed sign-out, and local appearance preferences. It supports Light, Dark, and System themes, five accents, appearance reset, and reduced motion.
+- The orbital loader covers startup, successful sign-in, and administrator dashboard refresh. Startup failures offer a retry.
+- Node passed 42 tests and Edge passed 12 smoke groups. Responsive checks covered 320, 390, 768, 1120, and 1440 pixels. A two-process check reconfirmed persistence with an isolated SQLite file.
+
 ## Boundaries
 
 Local email is simulated. SLA targets use continuous calendar time and are configurable by priority. Service-specific SLA overrides are not implemented. The demo uses fictional seeded accounts and local bearer sessions. The group must supply its team details and record the presentation.
+
+Account editing and password changes are unavailable. Menu controls support keyboard navigation. The application has no global shortcuts.
 
 See [test evidence](testing/TEST_RESULTS.md), [requirements matrix](requirements/COMPLIANCE_MATRIX.md), and [demo script](demo/DEMO_SCRIPT.md).

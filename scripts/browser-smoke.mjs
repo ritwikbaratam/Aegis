@@ -24,11 +24,14 @@ async function capture(page, filename) {
 
 async function signIn(page, email, password) {
   await page.goto(url + '/#/login');
+  await page.locator('.workspace-overlay').waitFor({ state: 'detached' });
   await page.getByLabel('Email address').fill(email);
   await page.getByLabel('Password', { exact: true }).fill(password);
-  await page.getByRole('button', { name: 'Sign in to AEGIS' }).click();
+  await page.getByRole('button', { name: 'Sign in to BITS IT Support' }).click();
+  await page.locator('.workspace-overlay').getByText('Preparing your dashboard', { exact: true }).waitFor();
   await page.waitForURL('**/#/dashboard');
   await page.locator('.metric').first().waitFor();
+  await page.locator('.workspace-overlay').waitFor({ state: 'detached' });
 }
 
 async function perform(page, action, values = {}) {
@@ -56,6 +59,27 @@ try {
     });
     return page;
   };
+
+  const entry = await newPage({ reducedMotion: 'no-preference', colorScheme: 'dark' });
+  const emblem = await entry.request.get(url + '/assets/bits-logo.jpeg');
+  assert.equal(emblem.headers()['content-type'], 'image/jpeg');
+  await entry.goto(url + '/');
+  const entryLoader = entry.locator('.workspace-overlay');
+  await entryLoader.getByText('Initializing workspace', { exact: true }).waitFor();
+  assert.equal(await entryLoader.locator('.halo-primary').evaluate(el => getComputedStyle(el).animationDuration), '2.8s');
+  assert.equal(await entryLoader.locator('.halo-secondary').evaluate(el => getComputedStyle(el).animationDirection), 'reverse');
+  assert.equal(await entryLoader.getByRole('img', { name: 'BITS Pilani emblem' }).getAttribute('src'), '/assets/bits-logo.jpeg');
+  assert.equal(await entry.locator('link[rel="icon"]').getAttribute('href'), '/assets/bits-logo.jpeg');
+  await capture(entry, 'bits-loader.png');
+  await entryLoader.waitFor({ state: 'detached' });
+  await entry.getByRole('heading', { name: 'Campus IT support' }).waitFor();
+  assert.equal(await entry.locator('#app').evaluate(el => el.inert), false);
+  assert.match(await entry.title(), /BITS IT Support/);
+  const wordmark = await entry.locator('.bits-wordmark > span').evaluateAll(letters => letters.map(el => el.getBoundingClientRect().top));
+  assert.ok(wordmark[1] < wordmark[0] && wordmark[2] < wordmark[3]);
+  await capture(entry, 'bits-login.png');
+  await entry.close();
+  console.log('PASS BITS branding, original JPEG and favicon, raised wordmark, and startup halo');
 
   const employee = await newPage();
   await signIn(employee, 'employee@aegis.local', 'Employee@12345');
@@ -113,6 +137,10 @@ try {
   const admin = await newPage();
   await signIn(admin, 'admin@aegis.local', 'Admin@12345');
   await capture(admin, 'admin-dashboard.png');
+  await admin.getByRole('button', { name: /Refresh/ }).click();
+  await admin.locator('.workspace-overlay').getByText('Updating your dashboard', { exact: true }).waitFor();
+  await admin.locator('.workspace-overlay').waitFor({ state: 'detached' });
+  await admin.getByRole('heading', { name: 'Command overview' }).waitFor();
   await admin.goto(url + '/#/admin/sla');
   const p1 = admin.locator('[data-priority="P1"]');
   await p1.getByLabel('Response minutes').fill('6');
@@ -197,8 +225,158 @@ try {
   await mobile.locator('.sidebar').getByRole('link', { name: 'Incidents', exact: true }).click();
   await mobile.getByRole('heading', { name: 'Incident register' }).waitFor();
   assert.equal(await mobile.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth), true, 'mobile register should not overflow the viewport');
+  console.log('PASS mobile navigation');
+
+  const longTitle = 'Campus network report '.concat('X'.repeat(132));
+  const employeeActor = auth.login('employee@aegis.local', 'Employee@12345').user;
+  const { incident: longReport } = incidentService.create(employeeActor, {
+    title: longTitle, description: 'Long-title fixture for checking the dashboard and incident detail layout.',
+    serviceId: 6, categoryId: 1, impact: 3, urgency: 3, affectedUsers: 800,
+  });
+  const assertNoOverflow = async (page, label) => {
+    const dimensions = await page.evaluate(() => ({
+      width: document.documentElement.clientWidth, content: document.documentElement.scrollWidth,
+    }));
+    assert.ok(dimensions.content <= dimensions.width + 1, `${label}: ${JSON.stringify(dimensions)}`);
+  };
+  for (const width of [1440, 1120, 768, 390, 320]) {
+    await employee.setViewportSize({ width, height: 850 });
+    await employee.goto(url + '/#/dashboard');
+    const row = employee.locator('.incident-compact-row').filter({ hasText: longTitle });
+    await row.waitFor();
+    await assertNoOverflow(employee, `employee dashboard at ${width}px`);
+    const positions = await row.evaluate((el) => ({
+      title: el.querySelector('.list-row-title').getBoundingClientRect().bottom,
+      meta: el.querySelector('.incident-row-code').getBoundingClientRect().top,
+      header: document.querySelector('.topbar').getBoundingClientRect().bottom,
+      heading: document.querySelector('.page-header h1').getBoundingClientRect().top,
+    }));
+    assert.ok(positions.title <= positions.meta && positions.header < positions.heading);
+    assert.equal(await row.locator('.incident-row-service').textContent(), 'Campus Network');
+    assert.equal(await row.locator('.badge').count(), 1);
+    if (width === 1440 || width === 390) await capture(employee, `bits-dashboard-${width}.png`);
+    await row.click();
+    await employee.waitForURL(`**/#/incidents/${longReport.id}`);
+    await employee.locator('.incident-hero').waitFor();
+    await assertNoOverflow(employee, `long incident detail at ${width}px`);
+    await employee.goto(url + '/#/incidents/new');
+    await employee.getByLabel('Short incident title').waitFor();
+    await assertNoOverflow(employee, `report form at ${width}px`);
+  }
+  await admin.setViewportSize({ width: 768, height: 850 });
+  await admin.goto(url + '/#/reports');
+  await admin.getByRole('heading', { name: 'Service analysis' }).waitFor();
+  await assertNoOverflow(admin, 'administrator reports at tablet width');
+  console.log('PASS long titles, clickable incident rows, header spacing and responsive layouts at 1440/1120/768/390/320px');
+
+  await employee.goto(url + '/#/dashboard');
+  await employee.locator('.metric').first().waitFor();
+  const trigger = employee.getByRole('button', { name: 'Account and settings' });
+  const panel = employee.locator('#account-menu');
+  await trigger.focus();
+  await employee.keyboard.press('ArrowDown');
+  assert.equal(await employee.evaluate(() => document.activeElement.textContent.trim()), 'My profile');
+  await employee.keyboard.press('ArrowDown');
+  assert.equal(await employee.evaluate(() => document.activeElement.textContent.trim()), 'Light');
+  const bounds = await panel.boundingBox();
+  assert.ok(bounds.x >= 0 && bounds.x + bounds.width <= 320 && bounds.y + bounds.height <= 850);
+  await capture(employee, 'bits-account-mobile.png');
+  await employee.keyboard.press('Escape');
+  assert.equal(await trigger.getAttribute('aria-expanded'), 'false');
+  assert.equal(await employee.evaluate(() => document.activeElement.id), 'account-trigger');
+  await trigger.click();
+  await employee.locator('.breadcrumb-brand').click();
+  assert.equal(await trigger.getAttribute('aria-expanded'), 'false');
+  await trigger.click();
+  await trigger.click();
+  assert.equal(await trigger.getAttribute('aria-expanded'), 'false');
+  await trigger.click();
+  await panel.getByRole('link', { name: 'About BITS IT Support' }).click();
+  await employee.locator('.support-page .bits-logo').waitFor();
+  assert.equal(await trigger.getAttribute('aria-expanded'), 'false');
+  await trigger.click();
+  await panel.getByRole('link', { name: 'User guide' }).click();
+  await employee.getByRole('heading', { name: 'User guide' }).waitFor();
+  await trigger.click();
+  await panel.getByRole('link', { name: 'My profile' }).click();
+  await employee.getByRole('heading', { name: 'Account details' }).waitFor();
+  console.log('PASS account menu keyboard, pointer and mobile behavior with Profile, About and User guide');
+
+  await employee.setViewportSize({ width: 1440, height: 900 });
+  await employee.goto(url + '/#/dashboard');
+  await employee.locator('.metric').first().waitFor();
+  await employee.emulateMedia({ reducedMotion: 'reduce' });
+  const semanticP1 = () => employee.locator('.incident-compact-row .activity-icon.critical').first().evaluate(el => getComputedStyle(el).color);
+  const p1Before = await semanticP1();
+  const applied = new Set();
+  for (const label of ['Blue', 'Purple', 'Green', 'Orange', 'Pink']) {
+    await trigger.click();
+    await panel.getByRole('button', { name: label, exact: true }).click();
+    assert.equal(await trigger.getAttribute('aria-expanded'), 'false');
+    applied.add(await employee.locator('.page-header .button.primary').evaluate(el => getComputedStyle(el).backgroundColor));
+    assert.equal(await semanticP1(), p1Before);
+  }
+  assert.equal(applied.size, 5);
+  await trigger.click();
+  await panel.getByRole('button', { name: 'Light', exact: true }).click();
+  const lightColor = await employee.locator('body').evaluate(el => getComputedStyle(el).color);
+  await trigger.click();
+  await capture(employee, 'bits-account-light.png');
+  await employee.reload();
+  await employee.locator('.workspace-overlay').waitFor({ state: 'detached' });
+  assert.equal(await employee.locator('html').getAttribute('data-theme'), 'light');
+  assert.equal(await employee.locator('html').getAttribute('data-accent'), 'pink');
+  await trigger.click();
+  await panel.getByRole('button', { name: 'System', exact: true }).click();
+  await employee.emulateMedia({ colorScheme: 'light' });
+  assert.equal(await employee.locator('body').evaluate(el => getComputedStyle(el).color), lightColor);
+  await employee.emulateMedia({ colorScheme: 'dark' });
+  assert.notEqual(await employee.locator('body').evaluate(el => getComputedStyle(el).color), lightColor);
+  await employee.emulateMedia({ reducedMotion: 'no-preference' });
+  await trigger.click();
+  await panel.getByRole('button', { name: 'Reduced animations' }).click();
+  assert.equal(await panel.evaluate(el => getComputedStyle(el).transitionDuration), '0s');
+  await employee.reload();
+  await employee.locator('.metric').first().waitFor();
+  assert.equal(await employee.locator('html').getAttribute('data-motion'), 'reduced');
+  await trigger.click();
+  await panel.getByRole('button', { name: 'Reset appearance' }).click();
+  assert.equal(await employee.locator('html').getAttribute('data-motion'), 'normal');
+  assert.equal(await employee.locator('html').getAttribute('data-theme'), 'dark');
+  assert.equal(await employee.locator('html').getAttribute('data-accent'), 'blue');
+  await employee.emulateMedia({ reducedMotion: 'reduce' });
+  assert.equal(await panel.evaluate(el => getComputedStyle(el).transitionDuration), '0s');
+  console.log('PASS three themes, five accents, semantic colors, persistence, appearance reset and reduced motion');
+
+  await employee.route('**/api/auth/me', route => route.abort());
+  await employee.reload();
+  await employee.getByRole('heading', { name: 'Could not load the workspace' }).waitFor();
+  await employee.locator('.workspace-overlay').waitFor({ state: 'detached' });
+  await employee.unroute('**/api/auth/me');
+  await employee.getByRole('button', { name: 'Try again' }).click();
+  await employee.locator('.metric').first().waitFor();
+  await employee.locator('.workspace-overlay').waitFor({ state: 'detached' });
+  await employee.setViewportSize({ width: 320, height: 640 });
+  const token = await employee.evaluate(() => localStorage.getItem('aegis_token'));
+  await trigger.click();
+  await panel.getByRole('button', { name: 'Sign out', exact: true }).click();
+  const logout = employee.getByRole('dialog', { name: 'Sign out?' });
+  const dialogBounds = await logout.boundingBox();
+  assert.ok(dialogBounds.x >= 0 && dialogBounds.x + dialogBounds.width <= 320);
+  await logout.getByRole('button', { name: 'Cancel', exact: true }).click();
+  assert.equal(await employee.evaluate(() => localStorage.getItem('aegis_token')), token);
+  await trigger.click();
+  await panel.getByRole('button', { name: 'Sign out', exact: true }).click();
+  await logout.getByRole('button', { name: 'Sign out', exact: true }).click();
+  await employee.waitForURL('**/#/login');
+  assert.equal(await employee.evaluate(() => localStorage.getItem('aegis_token')), null);
+  assert.equal((await employee.request.get(url + '/api/auth/me', { headers: { Authorization: `Bearer ${token}` } })).status(), 401);
+  await employee.goto(url + '/#/profile');
+  await employee.waitForURL('**/#/login');
+  console.log('PASS dashboard refresh loader, startup recovery, and mobile sign-out dialog with session revocation');
+
   assert.deepEqual(errors, []);
-  console.log('PASS mobile navigation and browser error checks');
+  console.log('PASS no client exceptions or HTTP 5xx responses');
 } finally {
   await browser?.close();
   await new Promise((resolve) => server.close(resolve));

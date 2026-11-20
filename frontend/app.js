@@ -1,4 +1,5 @@
 /* AEGIS client: dependency-free SPA served by the local AEGIS API. */
+import { accountMenu, brand, closeAccountMenu, handleAccountKey, toggleAccountMenu, withWorkspaceLoader } from './workspace-ui.js';
 const root = document.querySelector('#app');
 const toastRegion = document.querySelector('#toast-region');
 
@@ -14,7 +15,7 @@ const state = {
 const ICONS = {
   dashboard: '◫', incidents: '▤', plus: '+', bell: '◉', profile: '◌', work: '▧', users: '♙',
   services: '⌁', categories: '◇', policy: '◷', settings: '⚙', audit: '◴', reports: '▥',
-  escalation: '⚠', pulse: '◎', email: '✉', close: '×', logout: '↪', menu: '☰',
+  escalation: '⚠', pulse: '◎', email: '✉', close: '×', menu: '☰',
   search: '⌕', timeline: '◌', intelligence: '✦', check: '✓', info: 'i', shield: '⛨',
 };
 
@@ -55,9 +56,9 @@ async function api(path, options = {}) {
   if (hasBody && !headers.has('Content-Type') && !(options.body instanceof FormData)) headers.set('Content-Type', 'application/json');
   let response;
   try {
-    response = await fetch(`/api${path}`, { ...options, headers, credentials: 'same-origin' });
+    response = await fetch(`/api${path}`, { ...options, headers, credentials: 'same-origin', signal: options.signal ?? AbortSignal.timeout(12_000) });
   } catch (error) {
-    const offline = new Error('The AEGIS service is unreachable. Start the local backend and try again.');
+    const offline = new Error(error.name === 'TimeoutError' ? 'The request timed out. Try again.' : 'BITS IT Support is unreachable. Check the local server and try again.');
     offline.code = 'OFFLINE';
     throw offline;
   }
@@ -112,7 +113,7 @@ function emptyState(title, copy, actionLabel = '', action = '') {
   return `<div class="empty-state"><div><div class="empty-icon" aria-hidden="true">${ICONS.intelligence}</div><h3>${escapeHtml(title)}</h3><p>${escapeHtml(copy)}</p>${actionLabel ? `<button class="button primary" data-action="${escapeAttr(action)}" type="button">${escapeHtml(actionLabel)}</button>` : ''}</div></div>`;
 }
 
-function loading() { return `<div class="loading"><span class="spinner" aria-hidden="true"></span> Loading current AEGIS data…</div>`; }
+function loading() { return `<div class="loading"><span class="spinner" aria-hidden="true"></span> Loading…</div>`; }
 
 function badge(value, type = '') {
   const raw = String(value || 'Unknown');
@@ -162,22 +163,60 @@ function isActivePath(href) {
   const current = route().path;
   if (href.includes('?')) return location.hash.replace(/^#/, '') === href;
   if (href === '/dashboard') return current === '/dashboard';
+  if (href === '/incidents' && (current === '/incidents/new' || route().query.get('scope') === 'assigned')) return false;
   return current === href || current.startsWith(`${href}/`);
 }
 
 function shell(content, title = 'Dashboard') {
   const navigation = navGroups().map((group) => `<section class="nav-group"><span class="nav-group-label">${escapeHtml(group.label)}</span>${group.items.map(([label, href, icon]) => `<a class="nav-link ${isActivePath(href) ? 'active' : ''}" data-nav href="#${href}"><span class="nav-icon" aria-hidden="true">${ICONS[icon] || '•'}</span><span>${escapeHtml(label)}</span>${label === 'Notifications' && state.user?.unreadNotificationCount ? `<span class="nav-badge">${escapeHtml(state.user.unreadNotificationCount)}</span>` : ''}</a>`).join('')}</section>`).join('');
-  const adminClass = isAdmin() ? 'avatar-admin' : '';
-  return `<div class="app-shell ${state.navOpen ? 'nav-open' : ''}" id="app-shell"><aside class="sidebar" aria-label="Primary navigation"><div class="sidebar-header"><a class="brand" href="#/dashboard" aria-label="AEGIS dashboard"><span class="brand-mark">A</span><span class="brand-word">AEGIS</span></a><button class="icon-button" data-action="close-nav" aria-label="Close navigation">${ICONS.close}</button></div><div class="nav-scroll">${navigation}</div><div class="sidebar-user">${avatar(state.user, isAdmin())}<div><div class="sidebar-user-name">${escapeHtml(nameOf(state.user))}</div><div class="sidebar-user-role">${escapeHtml(ROLE_LABELS[ROLE()] || cap(ROLE()))}</div></div><button class="icon-button" data-action="logout" title="Log out" aria-label="Log out">${ICONS.logout}</button></div></aside><div class="workspace"><header class="topbar"><div class="topbar-actions"><button class="icon-button mobile-menu" data-action="toggle-nav" aria-label="Open navigation">${ICONS.menu}</button><div class="breadcrumbs"><span>AEGIS</span> <span aria-hidden="true">/</span> <strong>${escapeHtml(title)}</strong></div></div><div class="topbar-actions"><a class="icon-button alert-dot" data-nav href="#/notifications" aria-label="Open notifications">${ICONS.bell}</a>${!isTech() ? `<a class="button small" data-nav href="#/incidents/new">${ICONS.plus} Report incident</a>` : ''}</div></header><main class="content" id="main-content" tabindex="-1">${content}</main></div></div>`;
+  document.title = `${title} | BITS IT Support`;
+  return `<div class="app-shell ${state.navOpen ? 'nav-open' : ''}" id="app-shell">
+    <aside class="sidebar" id="workspace-sidebar" aria-label="Primary navigation">
+      <div class="sidebar-header">${brand({ href: '#/dashboard', size: 'brand-sidebar' })}<button class="icon-button sidebar-close" type="button" data-action="close-nav" aria-label="Close navigation">${ICONS.close}</button></div>
+      <nav class="nav-scroll" aria-label="Workspace">${navigation}</nav>
+      <div class="sidebar-user">${avatar(state.user, isAdmin())}<div><div class="sidebar-user-name">${escapeHtml(nameOf(state.user))}</div><div class="sidebar-user-role">${escapeHtml(ROLE_LABELS[ROLE()] || cap(ROLE()))}</div></div></div>
+    </aside>
+    <div class="nav-scrim" data-action="close-nav" aria-hidden="true"></div>
+    <div class="workspace">
+      <header class="topbar">
+        <div class="topbar-actions topbar-location">
+          <button class="icon-button mobile-menu" type="button" data-action="toggle-nav" aria-expanded="${state.navOpen}" aria-controls="workspace-sidebar" aria-label="Open navigation">${ICONS.menu}</button>
+          <div class="breadcrumbs"><span class="breadcrumb-brand">BITS IT Support</span><span class="breadcrumb-divider" aria-hidden="true">/</span><strong>${escapeHtml(title)}</strong></div>
+        </div>
+        <div class="topbar-actions">
+          <a class="icon-button ${state.user?.unreadNotificationCount ? 'alert-dot' : ''}" data-nav href="#/notifications" aria-label="Open notifications">${ICONS.bell}</a>
+          ${!isTech() ? `<a class="button small quick-report" data-nav href="#/incidents/new" aria-label="Report incident"><span aria-hidden="true">${ICONS.plus}</span><span>Report incident</span></a>` : ''}
+          ${accountMenu()}
+        </div>
+      </header>
+      <main class="content" id="main-content" tabindex="-1">${content}</main>
+    </div>
+  </div>`;
 }
 
 function authShell(mode = 'login') {
   const register = mode === 'register';
-  return `<div class="auth-shell"><section class="auth-intro"><a class="brand" href="#/login"><span class="brand-mark">A</span><span class="brand-word">AEGIS</span></a><div class="auth-copy"><p class="eyebrow">Intelligent Incident Command Center</p><h1>Bring every incident <span>under control.</span></h1><p>AEGIS connects people, operations, and explainable automation across the complete IT incident lifecycle.</p><div class="auth-proof"><span><i></i> Persistent audit history</span><span><i></i> SLA-aware decisions</span><span><i></i> Role-based workspace</span></div></div><small class="inline-note">Local academic demonstration environment. Not a production service.</small></section><main class="auth-card-wrap"><section class="auth-card" aria-labelledby="auth-title"><a class="brand" href="#/login"><span class="brand-mark">A</span><span class="brand-word">AEGIS</span></a><h2 id="auth-title">${register ? 'Create employee access' : 'Welcome back'}</h2><p>${register ? 'Register an employee account to report and track IT incidents.' : 'Sign in to your AEGIS operational workspace.'}</p>${register ? registerForm() : loginForm()}</section></main></div>`;
+  document.title = `${register ? 'Create an account' : 'Sign in'} | BITS IT Support`;
+  return `<div class="auth-shell">
+    <section class="auth-intro">
+      ${brand({ href: '#/login', size: 'brand-auth' })}
+      <div class="auth-copy">
+        <p class="eyebrow">BITS Pilani · Hyderabad Campus</p>
+        <h1>Campus IT support</h1>
+        <p>Report a technical issue, follow your request, and work with campus IT to get it resolved.</p>
+      </div>
+      <p class="auth-campus-note">CS F213 / MAC F212 project</p>
+    </section>
+    <main class="auth-card-wrap" id="main-content"><section class="auth-card" aria-labelledby="auth-title">
+      <h2 id="auth-title">${register ? 'Create an employee account' : 'Sign in'}</h2>
+      <p>${register ? 'Create an account to report and track campus IT incidents.' : 'Use your support account to continue.'}</p>
+      ${register ? registerForm() : loginForm()}
+    </section></main>
+  </div>`;
 }
 
 function loginForm() {
-  return `<form data-form="login" novalidate><div class="field"><label for="login-email">Email address</label><input id="login-email" name="email" type="email" autocomplete="email" required placeholder="you@example.com"></div><div class="field" style="margin-top: .9rem"><label for="login-password">Password</label><input id="login-password" name="password" type="password" autocomplete="current-password" required placeholder="Enter your password"></div><div id="form-message" aria-live="polite" style="margin-top:.8rem"></div><button class="button primary wide" style="margin-top:1.15rem" type="submit">Sign in to AEGIS</button></form><p class="auth-footer">New to the employee portal? <a href="#/register">Create an account</a></p><div class="demo-hint"><strong>Demo accounts:</strong> See the README for locally seeded development credentials.</div>`;
+  return `<form data-form="login" novalidate><div class="field"><label for="login-email">Email address</label><input id="login-email" name="email" type="email" autocomplete="email" required placeholder="you@example.com"></div><div class="field" style="margin-top: .9rem"><label for="login-password">Password</label><input id="login-password" name="password" type="password" autocomplete="current-password" required placeholder="Enter your password"></div><div id="form-message" aria-live="polite" style="margin-top:.8rem"></div><button class="button primary wide" style="margin-top:1.15rem" type="submit">Sign in to BITS IT Support</button></form><p class="auth-footer">New to the employee portal? <a href="#/register">Create an account</a></p><div class="demo-hint"><strong>Demo accounts:</strong> See the README for development sign-in details.</div>`;
 }
 
 function registerForm() {
@@ -224,12 +263,12 @@ async function renderDashboard(version) {
         ? [metric('Open requests', totals.active, 'Waiting for support'), metric('Awaiting verification', overview.byStatus?.find((row) => row.name === 'RESOLVED')?.value ?? 0, 'Ready for your review', 'amber'), metric('Closed requests', overview.closedIncidents, 'Completed requests', 'green')]
         : [metric('Assigned work', totals.active, 'Active incidents'), metric('Critical incidents', totals.critical, 'P1 incidents', 'red'), metric('Recorded SLA violations', totals.breached, 'Response or resolution targets missed', 'amber')];
       root.innerHTML = shell(pageHeader(title, roleSubtitle(), action) + `
-        <section class="metric-grid">${metrics.join('')}</section>
+        <section class="metric-grid role-metrics">${metrics.join('')}</section>
         <section class="dashboard-grid"><section class="card"><div class="card-header"><h2>${isEmployee() ? 'My incidents' : 'My operational queue'}</h2></div>${incidentCompactList(incidents)}</section>
         <section class="card"><div class="card-header"><h2>${isEmployee() ? 'Recent activity' : 'My capacity'}</h2></div>${isEmployee() ? activityList(recent) : workloadList(workload.filter((row) => row.id === state.user.id))}</section></section>`, title);
       return;
     }
-    root.innerHTML = shell(`${pageHeader('Command overview', roleSubtitle(), `<button class="button" data-action="reload">↻ Refresh</button>${isEmployee() ? '<a class="button primary" data-nav href="#/incidents/new">+ Report an incident</a>' : '<a class="button primary" data-nav href="#/incidents">Open incident queue</a>'}`)}<section class="metric-grid">${metric('All incidents', totals.total, 'Persistent incident records', 'blue')}${metric('Active response', totals.active, 'Open lifecycle records', 'teal')}${metric('Critical priority', totals.critical, 'P1 incidents requiring attention', 'red')}${metric('SLA violations', totals.breached, 'Recorded, not projected', 'amber')}${metric('SLA compliance', percent(totals.compliance), 'Measured from live records', 'green')}</section><section class="dashboard-grid"><section class="card"><div class="card-header"><div><h2>Incident signal</h2><p>Recent incident distribution from the database</p></div><a data-nav href="#/reports" class="button small">View reports</a></div>${renderBars(trends, 'label', 'count')}</section><section class="card"><div class="card-header"><div><h2>Response health</h2><p>Live SLA compliance snapshot</p></div></div>${renderDonut(totals.compliance, overview)}</section></section><section class="dashboard-grid"><section class="card"><div class="card-header"><div><h2>${isTech() ? 'My operational queue' : isEmployee() ? 'Recent incidents' : 'Incident queue'}</h2><p>Current results are loaded from AEGIS</p></div><a data-nav href="#/incidents" class="button small">View all</a></div>${incidentCompactList(incidents)}</section><section class="card"><div class="card-header"><div><h2>${isAdmin() ? 'Technician workload' : 'Recent activity'}</h2><p>${isAdmin() ? 'Active workload by technician' : 'Changes recorded on your incidents'}</p></div></div>${isAdmin() ? workloadList(workload) : activityList(recent)}</section></section>`, 'Dashboard');
+    root.innerHTML = shell(`${pageHeader('Command overview', roleSubtitle(), `<button class="button" data-action="reload">↻ Refresh</button>${isEmployee() ? '<a class="button primary" data-nav href="#/incidents/new">+ Report an incident</a>' : '<a class="button primary" data-nav href="#/incidents">Open incident queue</a>'}`)}<section class="metric-grid">${metric('All incidents', totals.total, 'Persistent incident records', 'blue')}${metric('Active response', totals.active, 'Open lifecycle records', 'teal')}${metric('Critical priority', totals.critical, 'P1 incidents requiring attention', 'red')}${metric('SLA violations', totals.breached, 'Recorded, not projected', 'amber')}${metric('SLA compliance', percent(totals.compliance), 'Measured from live records', 'green')}</section><section class="dashboard-grid"><section class="card"><div class="card-header"><div><h2>Incident signal</h2><p>Recent incident distribution from the database</p></div><a data-nav href="#/reports" class="button small">View reports</a></div>${renderBars(trends, 'label', 'count')}</section><section class="card"><div class="card-header"><div><h2>Response health</h2><p>Live SLA compliance snapshot</p></div></div>${renderDonut(totals.compliance, overview)}</section></section><section class="dashboard-grid"><section class="card"><div class="card-header"><div><h2>${isTech() ? 'My operational queue' : isEmployee() ? 'Recent incidents' : 'Incident queue'}</h2><p>Current incident records</p></div><a data-nav href="#/incidents" class="button small">View all</a></div>${incidentCompactList(incidents)}</section><section class="card"><div class="card-header"><div><h2>${isAdmin() ? 'Technician workload' : 'Recent activity'}</h2><p>${isAdmin() ? 'Active workload by technician' : 'Changes recorded on your incidents'}</p></div></div>${isAdmin() ? workloadList(workload) : activityList(recent)}</section></section>`, 'Dashboard');
   } catch (error) {
     if (version !== state.routeVersion) return;
     root.innerHTML = shell(`${pageHeader('Command overview', roleSubtitle())}${messagePanel(error)}`, 'Dashboard');
@@ -265,12 +304,23 @@ function renderDonut(compliance, overview = {}) {
 
 function incidentCompactList(items) {
   if (!items.length) return emptyState('No incidents found', 'There are no visible incidents for this workspace.', isEmployee() ? 'Report an incident' : '', isEmployee() ? 'new-incident' : '');
-  return `<div class="list">${items.slice(0, 7).map((incident) => `<a class="list-row" data-nav href="#/incidents/${encodeURIComponent(idOf(incident))}"><span class="activity-icon ${priorityTone(incident.priority)}">${escapeHtml(String(incident.priority || '•').slice(0, 2))}</span><span class="list-row-content"><span class="list-row-title">${escapeHtml(first(incident.title, incident.summary, idOf(incident)))}</span><span class="list-row-meta">${escapeHtml(incident.incidentCode || idOf(incident))} · ${escapeHtml(first(incident.service?.name, incident.serviceName, incident.category?.name, incident.categoryName, 'Uncategorised'))}</span></span>${badge(first(incident.status, 'New'))}</a>`).join('')}</div>`;
+  return `<div class="list incident-compact-list">${items.slice(0, 7).map(incident => `
+    <a class="list-row incident-compact-row" data-nav href="#/incidents/${encodeURIComponent(idOf(incident))}">
+      <span class="activity-icon ${priorityTone(incident.priority)}" aria-label="Priority ${escapeAttr(incident.priority ?? 'unknown')}">${escapeHtml(incident.priority ?? '—')}</span>
+      <span class="list-row-content">
+        <span class="list-row-title">${escapeHtml(first(incident.title, incident.summary, idOf(incident)))}</span>
+        <span class="list-row-meta incident-row-meta">
+          <span class="incident-row-code">${escapeHtml(incident.incidentCode || idOf(incident))}</span>
+          <span class="incident-row-service">${escapeHtml(first(incident.service?.name, incident.serviceName, incident.category?.name, incident.categoryName, 'Service unspecified'))}</span>
+        </span>
+      </span>
+      ${badge(incident.status || 'New')}
+    </a>`).join('')}</div>`;
 }
 
 function activityList(events) {
   if (!events.length) return emptyState('No activity recorded', 'New incident actions will appear here with their real audit time.');
-  return `<div class="list">${events.map((event) => `<div class="list-row"><span class="activity-icon ${eventTone(event)}">${eventTone(event) === 'critical' ? '!' : eventTone(event) === 'warn' ? '!' : '✓'}</span><span class="list-row-content"><span class="list-row-title">${escapeHtml(first(event.description, event.action, event.title, 'Incident activity'))}</span><span class="list-row-meta">${escapeHtml(first(event.actorName, event.userName, event.incidentId, 'AEGIS'))} · ${escapeHtml(relativeTime(first(event.timestamp, event.createdAt)))}</span></span></div>`).join('')}</div>`;
+  return `<div class="list">${events.map((event) => `<div class="list-row"><span class="activity-icon ${eventTone(event)}">${eventTone(event) === 'critical' ? '!' : eventTone(event) === 'warn' ? '!' : '✓'}</span><span class="list-row-content"><span class="list-row-title">${escapeHtml(first(event.description, event.action, event.title, 'Incident activity'))}</span><span class="list-row-meta">${escapeHtml(first(event.actorName, event.userName, event.incidentId, 'System'))} · ${escapeHtml(relativeTime(first(event.timestamp, event.createdAt)))}</span></span></div>`).join('')}</div>`;
 }
 
 function workloadList(items) {
@@ -327,11 +377,11 @@ function slaBadge(incident) {
 }
 
 async function renderNewIncident(version) {
-  root.innerHTML = shell(`${pageHeader('Report an incident', 'Tell us what is happening. AEGIS will explain the priority, SLA, and assignment after submission.')}<section class="card form-card">${loading()}</section>`, 'Report an incident');
+  root.innerHTML = shell(`${pageHeader('Report an incident', 'Tell us what is happening. After you submit, you’ll see the priority, SLA targets, and assignment.')}<section class="card form-card">${loading()}</section>`, 'Report an incident');
   try {
     const meta = await loadMeta();
     if (version !== state.routeVersion) return;
-    root.innerHTML = shell(`${pageHeader('Report an incident', 'Tell us what is happening. AEGIS will explain the priority, SLA, and assignment after submission.')}<form class="card form-card" data-form="new-incident" novalidate><section class="form-section"><h2>What needs attention?</h2><p>Use clear, factual language. The category suggestion is explainable and can always be overridden.</p><div class="form-grid"><div class="field span-2"><label for="incident-title">Short incident title</label><input id="incident-title" name="title" maxlength="180" required placeholder="Example: Payment application is unavailable"></div><div class="field span-2"><label for="incident-description">Detailed description</label><textarea id="incident-description" name="description" required placeholder="What happened, when did it start, what is affected, and what have you already tried?"></textarea></div></div><div class="suggestion" id="category-suggestion" hidden><span class="suggestion-icon">${ICONS.intelligence}</span><span><strong>Suggested category:</strong> <span data-suggestion-text></span></span></div><button class="button small" type="button" data-action="suggest-category">${ICONS.intelligence} Suggest category</button></section><section class="form-section"><h2>Impact assessment</h2><p>These inputs drive a deterministic priority calculation; they are not an opaque AI decision.</p><div class="form-grid triple"><div class="field"><label for="incident-category">Category</label><select id="incident-category" name="categoryId" required>${optionList(meta.categories, '', 'Select a category')}</select></div><div class="field"><label for="incident-service">Affected IT service</label><select id="incident-service" name="serviceId" required>${optionList(meta.services, '', 'Select the affected service')}</select></div><div class="field"><label for="incident-users">Affected users</label><input id="incident-users" name="affectedUsers" type="number" min="1" value="1" required></div><div class="field"><label for="incident-impact">Impact</label><select id="incident-impact" name="impact" required>${selectValues(['', '1', '2', '3'], '', 'Select impact')}</select><span class="field-help">1 = limited, 3 = widespread</span></div><div class="field"><label for="incident-urgency">Urgency</label><select id="incident-urgency" name="urgency" required>${selectValues(['', '1', '2', '3'], '', 'Select urgency')}</select><span class="field-help">1 = can wait, 3 = immediate</span></div><div class="field"><span class="field-help">AEGIS uses business criticality from the selected service.</span></div></div></section><section class="form-section"><h2>Potentially related incidents</h2><p class="inline-note">AEGIS checks unresolved incidents when you submit. It will never merge your report automatically.</p><div id="duplicate-preview"></div></section><footer class="form-footer"><a class="button" data-nav href="#/incidents">Cancel</a><button class="button primary" type="submit">Create incident &amp; calculate response</button></footer></form>`, 'Report an incident');
+    root.innerHTML = shell(`${pageHeader('Report an incident', 'Tell us what is happening. After you submit, you’ll see the priority, SLA targets, and assignment.')}<form class="card form-card" data-form="new-incident" novalidate><section class="form-section"><h2>What needs attention?</h2><p>Use clear, factual language. The category suggestion is explainable and can always be overridden.</p><div class="form-grid"><div class="field span-2"><label for="incident-title">Short incident title</label><input id="incident-title" name="title" maxlength="180" required placeholder="Example: Payment application is unavailable"></div><div class="field span-2"><label for="incident-description">Detailed description</label><textarea id="incident-description" name="description" required placeholder="What happened, when did it start, what is affected, and what have you already tried?"></textarea></div></div><div class="suggestion" id="category-suggestion" hidden><span class="suggestion-icon">${ICONS.intelligence}</span><span><strong>Suggested category:</strong> <span data-suggestion-text></span></span></div><button class="button small" type="button" data-action="suggest-category">${ICONS.intelligence} Suggest category</button></section><section class="form-section"><h2>Impact assessment</h2><p>Priority is calculated from impact, urgency, the number of affected users, and service criticality.</p><div class="form-grid triple"><div class="field"><label for="incident-category">Category</label><select id="incident-category" name="categoryId" required>${optionList(meta.categories, '', 'Select a category')}</select></div><div class="field"><label for="incident-service">Affected IT service</label><select id="incident-service" name="serviceId" required>${optionList(meta.services, '', 'Select the affected service')}</select></div><div class="field"><label for="incident-users">Affected users</label><input id="incident-users" name="affectedUsers" type="number" min="1" value="1" required></div><div class="field"><label for="incident-impact">Impact</label><select id="incident-impact" name="impact" required>${selectValues(['', '1', '2', '3'], '', 'Select impact')}</select><span class="field-help">1 = limited, 3 = widespread</span></div><div class="field"><label for="incident-urgency">Urgency</label><select id="incident-urgency" name="urgency" required>${selectValues(['', '1', '2', '3'], '', 'Select urgency')}</select><span class="field-help">1 = can wait, 3 = immediate</span></div><div class="field"><span class="field-help">Business criticality comes from the selected service.</span></div></div></section><section class="form-section"><h2>Potentially related incidents</h2><p class="inline-note">When you submit, you can review and link any suggested matches.</p><div id="duplicate-preview"></div></section><footer class="form-footer"><a class="button" data-nav href="#/incidents">Cancel</a><button class="button primary" type="submit">Create incident &amp; calculate response</button></footer></form>`, 'Report an incident');
   } catch (error) {
     if (version !== state.routeVersion) return;
     root.innerHTML = shell(`${pageHeader('Report an incident', 'Tell us what is happening.')}${messagePanel(error)}`, 'Report an incident');
@@ -399,16 +449,16 @@ function detailWork(incident, notes, comments) {
   const canReply = isEmployee() && incident.status === 'WAITING_FOR_INFORMATION';
   const canComment = incident.status !== 'CLOSED';
   const label = canReply ? 'Reply to information request' : 'Add a comment';
-  return `<section class="detail-section"><h3>Investigation notes</h3>${notes.length ? `<div class="timeline">${notes.map((note) => `<article class="timeline-item"><div class="timeline-title">${escapeHtml(first(note.title, note.authorName, note.createdBy?.name, 'Investigation note'))}</div><div class="timeline-meta">${escapeHtml(dateTime(first(note.createdAt, note.timestamp)))}</div><p class="timeline-description">${escapeHtml(first(note.text, note.note, note.content, ''))}</p></article>`).join('')}</div>` : emptyState('No investigation notes yet', 'Technicians can record diagnosis steps, findings, and safe next actions.')}${isTech() && !['RESOLVED', 'VERIFIED', 'CLOSED'].includes(incident.status) ? `<form data-form="add-note" data-incident-id="${id}" class="field" style="margin-top:1rem"><label for="note-body">Add investigation note</label><textarea id="note-body" name="note" required placeholder="Record a diagnosis step, finding, or action…"></textarea><button class="button primary" type="submit">Add note</button></form>` : ''}</section><section class="detail-section"><h3>Conversation</h3>${comments.length ? comments.map((comment) => `<article class="comment"><div class="comment-head"><strong>${escapeHtml(first(comment.author?.name, comment.authorName, comment.userName, 'AEGIS user'))}</strong><time>${escapeHtml(dateTime(first(comment.createdAt, comment.timestamp)))}</time></div><p>${escapeHtml(first(comment.text, comment.message, comment.content, ''))}</p></article>`).join('') : '<p class="inline-note">No conversation messages have been added.</p>'}${canComment ? `<form data-form="add-comment" data-operation="${canReply ? 'reply' : 'comments'}" data-incident-id="${id}" class="inline-form"><label class="screen-reader-only" for="comment-body">${label}</label><input id="comment-body" name="message" required placeholder="Provide the requested additional information…"><button class="button" type="submit">${canReply ? 'Send reply' : 'Send comment'}</button></form>` : '<p class="inline-note">Conversation is read-only after closure.</p>'}</section>`;
+  return `<section class="detail-section"><h3>Investigation notes</h3>${notes.length ? `<div class="timeline">${notes.map((note) => `<article class="timeline-item"><div class="timeline-title">${escapeHtml(first(note.title, note.authorName, note.createdBy?.name, 'Investigation note'))}</div><div class="timeline-meta">${escapeHtml(dateTime(first(note.createdAt, note.timestamp)))}</div><p class="timeline-description">${escapeHtml(first(note.text, note.note, note.content, ''))}</p></article>`).join('')}</div>` : emptyState('No investigation notes yet', 'Technicians can record diagnosis steps, findings, and safe next actions.')}${isTech() && !['RESOLVED', 'VERIFIED', 'CLOSED'].includes(incident.status) ? `<form data-form="add-note" data-incident-id="${id}" class="field" style="margin-top:1rem"><label for="note-body">Add investigation note</label><textarea id="note-body" name="note" required placeholder="Record a diagnosis step, finding, or action…"></textarea><button class="button primary" type="submit">Add note</button></form>` : ''}</section><section class="detail-section"><h3>Conversation</h3>${comments.length ? comments.map((comment) => `<article class="comment"><div class="comment-head"><strong>${escapeHtml(first(comment.author?.name, comment.authorName, comment.userName, 'Support user'))}</strong><time>${escapeHtml(dateTime(first(comment.createdAt, comment.timestamp)))}</time></div><p>${escapeHtml(first(comment.text, comment.message, comment.content, ''))}</p></article>`).join('') : '<p class="inline-note">No conversation messages have been added.</p>'}${canComment ? `<form data-form="add-comment" data-operation="${canReply ? 'reply' : 'comments'}" data-incident-id="${id}" class="inline-form"><label class="screen-reader-only" for="comment-body">${label}</label><input id="comment-body" name="message" required placeholder="Provide the requested additional information…"><button class="button" type="submit">${canReply ? 'Send reply' : 'Send comment'}</button></form>` : '<p class="inline-note">Conversation is read-only after closure.</p>'}</section>`;
 }
 
 function detailActivity(audits) {
   if (!audits.length) return `<section class="detail-section"><h3>Audit timeline</h3>${emptyState('No audit records were returned', 'Important lifecycle actions are written by the server and should appear here.')}</section>`;
-  return `<section class="detail-section"><h3>Persistent audit timeline</h3><div class="timeline">${audits.map((event) => `<article class="timeline-item ${eventTone(event)}"><div class="timeline-title">${escapeHtml(first(event.description, event.actionType, event.action, 'Incident activity'))}</div><div class="timeline-meta">${escapeHtml(first(event.actorName, event.actor?.name, event.actorRole, 'AEGIS'))} · ${escapeHtml(dateTime(first(event.timestamp, event.createdAt)))}</div>${event.oldValue || event.newValue ? `<p class="timeline-description">${escapeHtml(`${first(event.oldValue, '—')} → ${first(event.newValue, '—')}`)}</p>` : ''}</article>`).join('')}</div></section>`;
+  return `<section class="detail-section"><h3>Persistent audit timeline</h3><div class="timeline">${audits.map((event) => `<article class="timeline-item ${eventTone(event)}"><div class="timeline-title">${escapeHtml(first(event.description, event.actionType, event.action, 'Incident activity'))}</div><div class="timeline-meta">${escapeHtml(first(event.actorName, event.actor?.name, event.actorRole, 'System'))} · ${escapeHtml(dateTime(first(event.timestamp, event.createdAt)))}</div>${event.oldValue || event.newValue ? `<p class="timeline-description">${escapeHtml(`${first(event.oldValue, '—')} → ${first(event.newValue, '—')}`)}</p>` : ''}</article>`).join('')}</div></section>`;
 }
 
 function detailRelated(related, recommendations) {
-  return `<section class="detail-section"><h3>Potentially related incidents</h3>${related.length ? `<div class="list">${related.map((item) => `<a class="list-row" data-nav href="#/incidents/${encodeURIComponent(idOf(item))}"><span class="activity-icon">⌁</span><span class="list-row-content"><span class="list-row-title">${escapeHtml(first(item.title, idOf(item)))}</span><span class="list-row-meta">${escapeHtml(first(item.similarityScore != null ? `Similarity ${item.similarityScore}%` : null, item.similarityExplanation, item.reason, item.similarity ? `Similarity ${Math.round(Number(item.similarity) * 100)}%` : 'Related incident'))}</span></span>${badge(first(item.priority, item.status, 'Related'))}</a>`).join('')}</div>` : emptyState('No linked incidents', 'Duplicate checks are suggestive only. AEGIS never merges records automatically.')}</section><section class="detail-section"><h3>Suggested historical resolutions</h3>${recommendations.length ? `<div class="list">${recommendations.map((item) => `<div class="list-row"><span class="activity-icon">✦</span><span class="list-row-content"><span class="list-row-title">${escapeHtml(first(item.incident?.title, item.title, item.incidentId, 'Resolved incident'))}</span><span class="list-row-meta">${escapeHtml(first(item.resolution, item.resolutionSummary, item.reason, item.description, 'A related historical resolution.'))}</span></span></div>`).join('')}</div>` : emptyState('No matching resolved incidents', 'Resolution suggestions appear only when the database has relevant, technician-reviewed history.')}</section>`;
+  return `<section class="detail-section"><h3>Potentially related incidents</h3>${related.length ? `<div class="list">${related.map((item) => `<a class="list-row" data-nav href="#/incidents/${encodeURIComponent(idOf(item))}"><span class="activity-icon">⌁</span><span class="list-row-content"><span class="list-row-title">${escapeHtml(first(item.title, idOf(item)))}</span><span class="list-row-meta">${escapeHtml(first(item.similarityScore != null ? `Similarity ${item.similarityScore}%` : null, item.similarityExplanation, item.reason, item.similarity ? `Similarity ${Math.round(Number(item.similarity) * 100)}%` : 'Related incident'))}</span></span>${badge(first(item.priority, item.status, 'Related'))}</a>`).join('')}</div>` : emptyState('No linked incidents', 'Potential matches appear here after a duplicate check.')}</section><section class="detail-section"><h3>Suggested historical resolutions</h3>${recommendations.length ? `<div class="list">${recommendations.map((item) => `<div class="list-row"><span class="activity-icon">✦</span><span class="list-row-content"><span class="list-row-title">${escapeHtml(first(item.incident?.title, item.title, item.incidentId, 'Resolved incident'))}</span><span class="list-row-meta">${escapeHtml(first(item.resolution, item.resolutionSummary, item.reason, item.description, 'A related historical resolution.'))}</span></span></div>`).join('')}</div>` : emptyState('No matching resolved incidents', 'Resolution suggestions appear only when the database has relevant, technician-reviewed history.')}</section>`;
 }
 
 function slaPanel(incident) {
@@ -456,7 +506,7 @@ async function renderNotifications(version) {
     state.user.unreadNotificationCount = response.unreadCount;
     if (version !== state.routeVersion) return;
     const items = listOf(response);
-    root.innerHTML = shell(`${pageHeader('Notifications', 'Persistent in-app notifications generated by real incident events.', '<button class="button" data-action="reload">Refresh</button>')}<section class="card">${items.length ? `<div class="notification-list">${items.map((item) => `<button type="button" class="notification ${!(item.read || item.readAt) ? 'unread' : ''}" data-action="open-notification" data-notification-id="${escapeAttr(idOf(item))}" data-incident-id="${escapeAttr(item.incidentId ?? '')}"><span class="notification-icon">${notificationGlyph(item)}</span><div><div class="notification-title">${escapeHtml(first(item.subject, item.title, item.type, 'AEGIS update'))}</div><div class="notification-text">${escapeHtml(first(item.message, item.body, item.description, ''))}</div></div><time>${escapeHtml(relativeTime(first(item.createdAt, item.timestamp)))}</time></button>`).join('')}</div>` : emptyState('All caught up', 'There are no notifications in your persistent AEGIS inbox.')}</section>`, 'Notifications');
+    root.innerHTML = shell(`${pageHeader('Notifications', 'Persistent in-app notifications generated by real incident events.', '<button class="button" data-action="reload">Refresh</button>')}<section class="card">${items.length ? `<div class="notification-list">${items.map((item) => `<button type="button" class="notification ${!(item.read || item.readAt) ? 'unread' : ''}" data-action="open-notification" data-notification-id="${escapeAttr(idOf(item))}" data-incident-id="${escapeAttr(item.incidentId ?? '')}"><span class="notification-icon">${notificationGlyph(item)}</span><div><div class="notification-title">${escapeHtml(first(item.subject, item.title, item.type, 'Support update'))}</div><div class="notification-text">${escapeHtml(first(item.message, item.body, item.description, ''))}</div></div><time>${escapeHtml(relativeTime(first(item.createdAt, item.timestamp)))}</time></button>`).join('')}</div>` : emptyState('All caught up', 'You have no notifications.')}</section>`, 'Notifications');
   } catch (error) { if (version === state.routeVersion) root.innerHTML = shell(`${pageHeader('Notifications', 'Persistent in-app notifications generated by real incident events.')}${messagePanel(error)}`, 'Notifications'); }
 }
 
@@ -469,12 +519,12 @@ async function renderProfile(version) {
     if (version !== state.routeVersion) return;
     state.user = { ...state.user, ...user };
     localStorage.setItem('aegis_user', JSON.stringify(state.user));
-    const header = pageHeader('My profile', 'Your current AEGIS account.');
+    const header = pageHeader('My profile', 'Your campus support account.');
     const skills = user.role === 'TECHNICIAN' ? `<dt>Skills</dt><dd>${escapeHtml(user.skills.join(', ') || 'No skills configured')}</dd><dt>Available</dt><dd>${user.available ? 'Yes' : 'No'}</dd><dt>Capacity</dt><dd>${escapeHtml(user.capacity)}</dd>` : '';
     root.innerHTML = shell(header + `<section class="card form-section"><h2>Account details</h2>
       <dl class="definition-list"><dt>Name</dt><dd>${escapeHtml(user.name)}</dd><dt>Email</dt><dd>${escapeHtml(user.email)}</dd>
       <dt>Role</dt><dd>${escapeHtml(ROLE_LABELS[user.role])}</dd><dt>Status</dt><dd>${user.active ? 'Active' : 'Inactive'}</dd>${skills}</dl></section>`, 'Profile');
-  } catch (error) { if (version === state.routeVersion) root.innerHTML = shell(`${pageHeader('My profile', 'Your authenticated AEGIS identity.')}${messagePanel(error)}`, 'Profile'); }
+  } catch (error) { if (version === state.routeVersion) root.innerHTML = shell(`${pageHeader('My profile', 'Your campus support account.')}${messagePanel(error)}`, 'Profile'); }
 }
 
 async function renderWorkload(version) {
@@ -488,7 +538,7 @@ async function renderWorkload(version) {
 }
 
 const ADMIN_PAGES = {
-  '/admin/users': { title: 'User management', subtitle: 'Create and manage local AEGIS accounts with enforced roles.', endpoint: '/admin/users', resource: 'users', columns: [['name', 'Name'], ['email', 'Email'], ['role', 'Role'], ['active', 'Status']] },
+  '/admin/users': { title: 'User management', subtitle: 'Create and manage local support accounts with enforced roles.', endpoint: '/admin/users', resource: 'users', columns: [['name', 'Name'], ['email', 'Email'], ['role', 'Role'], ['active', 'Status']] },
   '/admin/technicians': { title: 'Technician management', subtitle: 'Manage technician skills, availability and capacity.', endpoint: '/admin/technicians', resource: 'technicians', columns: [['name', 'Technician'], ['skills', 'Skills'], ['available', 'Availability'], ['capacity', 'Capacity'], ['activeWorkload', 'Active incidents']] },
   '/admin/services': { title: 'IT service management', subtitle: 'Maintain business criticality and service availability context.', endpoint: '/admin/services', resource: 'services', columns: [['name', 'Service'], ['description', 'Description'], ['businessCriticality', 'Criticality'], ['active', 'Status']] },
   '/admin/categories': { title: 'Category management', subtitle: 'Manage incident categories and transparent keyword mappings.', endpoint: '/admin/categories', resource: 'categories', columns: [['name', 'Category'], ['description', 'Description'], ['keywords', 'Keywords'], ['active', 'Status']] },
@@ -612,7 +662,7 @@ async function renderServicePulse(version) {
   try {
     const response = await api('/admin/service-pulse'); if (version !== state.routeVersion) return; const services = listOf(response.services);
     const dependencyForm = `<form class="card form-section" data-form="dependency"><h2>Add a service dependency</h2><div class="form-grid"><label class="field">Service<select name="serviceId" required>${optionList(services)}</select></label><label class="field">Depends on<select name="dependsOnServiceId" required>${optionList(services)}</select></label></div><footer class="form-footer"><button class="button primary" type="submit">Save dependency</button></footer></form>`;
-    root.innerHTML = shell(`${pageHeader('Service Pulse', 'Dependency-aware, potential downstream impact intelligence.')}<section class="card"><div class="card-header"><div><h2>Service dependency map</h2><p>Potential impact indicators only; AEGIS does not claim definitive root cause.</p></div></div>${services.length ? `<div class="table-scroll"><table class="data-table"><thead><tr><th>Service</th><th>Health signal</th><th>Active incidents</th><th>Critical incidents</th><th>Potential impact</th></tr></thead><tbody>${services.map((service) => `<tr><td><strong>${escapeHtml(first(service.name, service.serviceName, 'Service'))}</strong></td><td>${badge(numeric(service.criticalIncidents) > 0 ? 'At risk' : numeric(service.activeIncidents) > 0 ? 'Active' : 'Healthy')}</td><td>${escapeHtml(first(service.activeIncidents, service.activeIncidentCount, service.activeCount, 0))}</td><td>${escapeHtml(first(service.criticalIncidents, service.criticalIncidentCount, service.criticalCount, 0))}</td><td>${escapeHtml(listOf(service.potentialImpact).join(', ') || 'No related downstream services recorded.')}</td></tr>`).join('')}</tbody></table></div>` : emptyState('No service dependency records', 'Administrators can define dependencies to enable Service Pulse.')}</section>${dependencyForm}`, 'Service Pulse');
+    root.innerHTML = shell(`${pageHeader('Service Pulse', 'Dependency-aware, potential downstream impact intelligence.')}<section class="card"><div class="card-header"><div><h2>Service dependency map</h2><p>Open incidents and service dependencies can indicate which services may be affected.</p></div></div>${services.length ? `<div class="table-scroll"><table class="data-table"><thead><tr><th>Service</th><th>Health signal</th><th>Active incidents</th><th>Critical incidents</th><th>Potential impact</th></tr></thead><tbody>${services.map((service) => `<tr><td><strong>${escapeHtml(first(service.name, service.serviceName, 'Service'))}</strong></td><td>${badge(numeric(service.criticalIncidents) > 0 ? 'At risk' : numeric(service.activeIncidents) > 0 ? 'Active' : 'Healthy')}</td><td>${escapeHtml(first(service.activeIncidents, service.activeIncidentCount, service.activeCount, 0))}</td><td>${escapeHtml(first(service.criticalIncidents, service.criticalIncidentCount, service.criticalCount, 0))}</td><td>${escapeHtml(listOf(service.potentialImpact).join(', ') || 'No related downstream services recorded.')}</td></tr>`).join('')}</tbody></table></div>` : emptyState('No service dependency records', 'Administrators can define dependencies to enable Service Pulse.')}</section>${dependencyForm}`, 'Service Pulse');
   } catch (error) { if (version === state.routeVersion) root.innerHTML = shell(`${pageHeader('Service Pulse', 'Dependency-aware potential impact intelligence.')}${messagePanel(error)}`, 'Service Pulse'); }
 }
 
@@ -679,7 +729,11 @@ async function submitForm(form) {
   try {
     if (kind === 'login') {
       const session = objectOf(await api('/auth/login', { method: 'POST', body: jsonBody(values) }));
-      saveSession(session); toast('Signed in to AEGIS.', 'success'); go('/dashboard'); return;
+      saveSession(session);
+      history.replaceState(null, '', '#/dashboard');
+      await runWorkspaceLoad('Preparing your dashboard', renderRoute, 1600);
+      toast('Signed in.', 'success');
+      return;
     }
     if (kind === 'register') {
       const response = objectOf(await api('/auth/register', { method: 'POST', body: jsonBody(values) }));
@@ -803,6 +857,7 @@ async function renderRoute() {
   if (/^\/incidents\/[^/]+$/.test(path)) return renderIncidentDetail(decodeURIComponent(path.split('/').pop()), version);
   if (path === '/notifications') return renderNotifications(version);
   if (path === '/profile') return renderProfile(version);
+  if (path === '/help' || path === '/about') return renderSupportPage(path);
   if (path === '/workload') return renderWorkload(version);
   if (path === '/admin/assignment') return renderAssignment(version);
   if (path === '/admin/sla') return renderSlaPolicies(version);
@@ -813,26 +868,143 @@ async function renderRoute() {
   renderNotFound(version);
 }
 
+function renderSupportPage(path) {
+  if (path === '/about') {
+    root.innerHTML = shell(pageHeader('About BITS IT Support') + `
+      <section class="card form-section support-page">
+        ${brand({ size: 'brand-about' })}
+        <h2>BITS Pilani, Hyderabad Campus</h2>
+        <p>BITS IT Support is the campus-facing workspace for reporting and resolving IT incidents. It was developed as AEGIS for the CS F213 / MAC F212 Object-Oriented Programming course.</p>
+        <a class="button" data-nav href="#/help">Open the user guide</a>
+      </section>`, 'About');
+    return;
+  }
+  const steps = isEmployee() ? [
+    ['Report an incident', 'Choose the affected service, describe what happened, and submit the request.', '/incidents/new'],
+    ['Track your requests', 'Open an incident to read updates, respond to a technician, or verify a resolution.', '/incidents'],
+  ] : isTech() ? [
+    ['Review your queue', 'Open an assigned incident. Acknowledge it, start investigation, and record your findings and resolution.', '/incidents?scope=assigned'],
+    ['Check your workload', 'Review your capacity and open assignments.', '/workload'],
+  ] : [
+    ['Review the SLA monitor', 'Check deadline risks and recorded violations for open incidents.', '/sla-monitor'],
+    ['Review reports', 'Filter incident activity and export the results.', '/reports'],
+  ];
+  steps.push(['Check notifications', 'Open an update to read it and follow its incident.', '/notifications']);
+  root.innerHTML = shell(pageHeader('User guide', 'Common tasks for your role.') + `<div class="support-guide">${steps.map(([title, description, link]) =>
+    `<section class="card form-section"><h2><a class="support-link" data-nav href="#${link}">${title}</a></h2><p>${description}</p></section>`
+  ).join('')}</div>`, 'User guide');
+}
+
+function setSidebar(open, restoreFocus = false) {
+  state.navOpen = open;
+  document.querySelector('#app-shell')?.classList.toggle('nav-open', open);
+  const trigger = document.querySelector('.mobile-menu');
+  trigger?.setAttribute('aria-expanded', String(open));
+  if (open) document.querySelector('.sidebar-close')?.focus();
+  else if (restoreFocus) trigger?.focus();
+}
+
+function requestSignOut() {
+  closeAccountMenu({ focus: true });
+  if (document.querySelector('.logout-dialog')) return;
+  const dialog = document.createElement('dialog');
+  dialog.className = 'modal logout-dialog';
+  dialog.setAttribute('aria-labelledby', 'logout-title');
+  dialog.innerHTML = `<form method="dialog">
+    <div class="modal-header"><h2 id="logout-title">Sign out?</h2></div>
+    <p class="confirm-copy">You’ll need to sign in again to access the workspace.</p>
+    <div class="modal-footer">
+      <button type="submit" class="button" value="cancel" autofocus>Cancel</button>
+      <button type="submit" class="button danger" value="confirm">Sign out</button>
+    </div>
+  </form>`;
+  let pending = false;
+  dialog.addEventListener('cancel', event => { if (pending) event.preventDefault(); });
+  dialog.addEventListener('close', () => dialog.remove(), { once: true });
+  dialog.addEventListener('submit', async (event) => {
+    if (event.submitter.value !== 'confirm') return;
+    event.preventDefault();
+    pending = true;
+    for (const button of dialog.querySelectorAll('button')) button.disabled = true;
+    event.submitter.textContent = 'Signing out…';
+    let revoked = true;
+    try { await api('/auth/logout', { method: 'POST' }); } catch (error) { revoked = error.status === 401; }
+    clearSession();
+    dialog.close();
+    history.replaceState(null, '', '#/login');
+    await renderRoute();
+    toast(revoked ? 'Signed out.' : 'Signed out of this browser. The server could not confirm the request.');
+  });
+  document.body.append(dialog);
+  dialog.showModal();
+}
+
+async function initializeWorkspace() {
+  if (!state.token && state.user) clearSession();
+  if (state.token) {
+    const token = state.token;
+    try {
+      const response = await api('/auth/me');
+      if (state.token === token) saveSession({ token, user: response.user });
+    } catch (error) {
+      if (error.status !== 401) throw error;
+    }
+  }
+  if (!location.hash) history.replaceState(null, '', state.user ? '#/dashboard' : '#/login');
+  await renderRoute();
+}
+
+function runWorkspaceLoad(message, task, minimum = 0) {
+  return withWorkspaceLoader(message, async () => {
+    try {
+      await task();
+    } catch (error) {
+      root.innerHTML = `<main class="startup-recovery" id="main-content">
+        ${brand({ size: 'brand-about' })}
+        <h1>Could not load the workspace</h1><p role="alert">${escapeHtml(error.message)}</p>
+        <div class="page-actions"><button class="button primary" type="button" data-action="retry-workspace">Try again</button>
+        ${state.token ? '<button class="button" type="button" data-action="request-logout">Sign out</button>' : ''}</div>
+      </main>`;
+    }
+  }, { minimum });
+}
+
 function renderUnauthorized(version) {
   if (version !== state.routeVersion) return;
-  root.innerHTML = shell(`${pageHeader('Access restricted', 'Your current role is not authorised to open this operational view.')}<section class="card">${emptyState('Authorisation required', 'AEGIS blocked this page because the backend role policy does not grant your account access.', 'Return to dashboard', 'nav-dashboard')}</section>`, 'Unauthorised');
+  root.innerHTML = shell(`${pageHeader('Access restricted', 'Your current role is not authorised to open this operational view.')}<section class="card">${emptyState('Authorisation required', 'Your account does not have access to this workspace.', 'Return to dashboard', 'nav-dashboard')}</section>`, 'Unauthorised');
 }
 
 function renderNotFound(version) {
   if (version !== state.routeVersion) return;
-  root.innerHTML = shell(`${pageHeader('Page not found', 'The requested AEGIS route does not exist.')}<section class="card">${emptyState('This route is unavailable', 'Use the primary navigation to return to an accessible AEGIS workspace.', 'Return to dashboard', 'nav-dashboard')}</section>`, 'Not found');
+  root.innerHTML = shell(`${pageHeader('Page not found', 'The requested support page could not be found.')}<section class="card">${emptyState('This route is unavailable', 'Use the primary navigation to return to an workspace.', 'Return to dashboard', 'nav-dashboard')}</section>`, 'Not found');
 }
 
 document.addEventListener('click', async (event) => {
-  const nav = event.target.closest('[data-nav]'); if (nav) { state.navOpen = false; return; }
+  const appearanceChoice = event.target.closest('[data-theme-choice], [data-accent-choice]');
+  if (appearanceChoice) {
+    const { themeChoice, accentChoice } = appearanceChoice.dataset;
+    window.bitsAppearance.set(themeChoice ? { theme: themeChoice } : { accent: accentChoice });
+    closeAccountMenu({ focus: true });
+    return;
+  }
+  if (!event.target.closest('.account-control')) closeAccountMenu();
+  const nav = event.target.closest('[data-nav]'); if (nav) { closeAccountMenu(); setSidebar(false); return; }
   const incidentRow = event.target.closest('[data-incident-link]'); if (incidentRow && !event.target.closest('a,button')) { go(`/incidents/${encodeURIComponent(incidentRow.dataset.incidentLink)}`); return; }
   const target = event.target.closest('[data-action]'); if (!target) return;
   const action = target.dataset.action;
-  if (action === 'reload') return renderRoute();
-  if (action === 'toggle-nav') { state.navOpen = !state.navOpen; const shellNode = document.querySelector('#app-shell'); if (shellNode) shellNode.classList.toggle('nav-open', state.navOpen); return; }
-  if (action === 'close-nav') { state.navOpen = false; document.querySelector('#app-shell')?.classList.remove('nav-open'); return; }
+  if (action === 'retry-workspace') return runWorkspaceLoad('Loading workspace', initializeWorkspace);
+  if (action === 'reload') return route().path === '/dashboard' ? runWorkspaceLoad('Updating your dashboard', renderRoute) : renderRoute();
+  if (action === 'toggle-account') return toggleAccountMenu();
+  if (action === 'toggle-motion' || action === 'reset-appearance') {
+    if (action === 'toggle-motion') window.bitsAppearance.set({ reducedMotion: !window.bitsAppearance.get().reducedMotion });
+    else window.bitsAppearance.reset();
+    closeAccountMenu({ focus: true });
+    return;
+  }
+  if (action === 'toggle-nav') return setSidebar(!state.navOpen);
+  if (action === 'close-nav') return setSidebar(false, true);
   if (action === 'close-modal') return closeModal();
-  if (action === 'logout') { try { await api('/auth/logout', { method: 'POST' }); } catch { /* local clear is still safe */ } clearSession(); toast('Signed out of AEGIS.'); go('/login'); return; }
+  if (action === 'request-logout') return requestSignOut();
   if (action === 'new-incident') return go('/incidents/new');
   if (action === 'nav-incidents') return go('/incidents');
   if (action === 'nav-dashboard') return go('/dashboard');
@@ -859,11 +1031,21 @@ document.querySelector('.skip-link')?.addEventListener('click', (event) => {
   const main = document.querySelector('main');
   if (main) { event.preventDefault(); main.tabIndex = -1; main.focus(); }
 });
-window.addEventListener('hashchange', renderRoute);
+document.addEventListener('keydown', (event) => {
+  handleAccountKey(event);
+  if (event.key === 'Escape' && state.navOpen && !event.defaultPrevented) setSidebar(false, true);
+});
+document.addEventListener('focusin', (event) => {
+  if (!event.target.closest('.account-control')) closeAccountMenu();
+});
+window.addEventListener('hashchange', () => {
+  window.scrollTo(0, 0);
+  renderRoute();
+});
 window.setInterval(updateSlaClocks, 1000);
 window.addEventListener('online', () => toast('Connection restored.'));
-window.addEventListener('offline', () => toast('Network connection lost; AEGIS cannot contact the backend.', 'error'));
-if (!location.hash) go(state.user ? '/dashboard' : '/login'); else renderRoute();
+window.addEventListener('offline', () => toast('Connection lost. Reconnect to continue using IT Support.', 'error'));
+runWorkspaceLoad('Initializing workspace', initializeWorkspace, 1600);
 
 function assignmentPanel(incident, assignment = {}) {
   const explanation = first(assignment.explanation, assignment.reason, incident.assignmentExplanation, 'No assignment explanation was returned for this incident.');

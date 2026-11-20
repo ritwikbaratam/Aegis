@@ -2,6 +2,8 @@
 
 AEGIS is a locally runnable IT Service Management (ITSM) and incident-resolution system for the CS F213 / MAC F212 OOP project. It supports the incident journey from **reporting** through **classification, prioritisation, assignment, investigation, resolution, verification, and closure**.
 
+The browser workspace is called **BITS IT Support**. Use the three-dot menu in the header for your profile, appearance settings, the user guide, and sign-out. Appearance preferences are saved in the browser. The profile shows account details and is read-only.
+
 The application is deliberately local-first: a Node.js 24 server, a persistent SQLite database, and a responsive browser UI. It does not need API keys, Docker, or a cloud account.
 
 ## Core capabilities

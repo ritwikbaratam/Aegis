@@ -11,6 +11,6 @@
     "start": "node backend/src/server.js",
     "dev": "node --watch backend/src/server.js",
     "test": "node --test \"backend/test/*.test.js\"",
-    "check": "node --check backend/src/server.js && node --check backend/src/database.js && node --check backend/src/domain.js && node --check backend/src/services.js && node --check frontend/app.js"
+    "check": "node --check backend/src/server.js && node --check backend/src/database.js && node --check backend/src/domain.js && node --check backend/src/services.js && node --check frontend/appearance.js && node --check frontend/workspace-ui.js && node --check frontend/app.js"
   }
 }
