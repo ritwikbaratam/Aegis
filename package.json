@@ -1,0 +1,16 @@
+{
+  "name": "aegis-intelligent-incident-command-center",
+  "version": "1.0.0",
+  "private": true,
+  "description": "AEGIS - Intelligent IT Service Management & Incident Resolution System",
+  "type": "module",
+  "engines": {
+    "node": ">=24.0.0"
+  },
+  "scripts": {
+    "start": "node backend/src/server.js",
+    "dev": "node --watch backend/src/server.js",
+    "test": "node --test \"backend/test/*.test.js\"",
+    "check": "node --check backend/src/server.js && node --check backend/src/database.js && node --check backend/src/domain.js && node --check backend/src/services.js && node --check frontend/app.js"
+  }
+}

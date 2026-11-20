@@ -1,0 +1,336 @@
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import http from 'node:http';
+import os from 'node:os';
+import path from 'node:path';
+import test from 'node:test';
+import { AegisDatabase } from '../src/database.js';
+import { AssignmentStrategyFactory, ConflictError, ForbiddenError, IncidentStatus, LifecycleError, PriorityCalculator, Roles, UnauthorizedError, toPublicUser } from '../src/domain.js';
+import { createApplication } from '../src/server.js';
+import { createServices, seedDemoData } from '../src/services.js';
+
+function setup(seed = true) {
+  const database = new AegisDatabase(':memory:');
+  const services = createServices({ database });
+  if (seed) seedDemoData({ database, services });
+  const login = (email, password) => services.auth.actorForToken(services.auth.login(email, password).token);
+  return {
+    database, services,
+    admin: () => login('admin@aegis.local', 'Admin@12345'),
+    employee: () => login('employee@aegis.local', 'Employee@12345'),
+    technician: (email = 'jamie.apps@aegis.local') => login(email, 'Technician@12345'),
+    close: () => database.close(),
+  };
+}
+
+function seededIncident(context, title = 'Payment application unavailable') {
+  return context.database.get('SELECT * FROM incidents WHERE title=:title', { title });
+}
+
+const paymentReport = {
+  title: 'Payment application unavailable',
+  description: 'Payment transactions are failing for students and staff. The payment application is unavailable.',
+  serviceId: 1, categoryId: 4, impact: 3, urgency: 3, affectedUsers: 650,
+};
+
+test('invalid incident fields leave the database unchanged', (t) => {
+  const app = setup();
+  t.after(app.close);
+  const before = app.database.value('SELECT COUNT(*) FROM incidents');
+  assert.throws(() => app.services.incidentService.create(app.employee(), { ...paymentReport, affectedUsers: 1.5 }), { code: 'VALIDATION_ERROR' });
+  assert.equal(app.database.value('SELECT COUNT(*) FROM incidents'), before);
+});
+
+test('no assignment is made when capacity and availability rules exclude all technicians', (t) => {
+  const app = setup();
+  t.after(app.close);
+  const [first, ...remaining] = app.services.admin.technicians(app.admin());
+  app.services.admin.updateUser(app.admin(), first.id, { capacity: 0 });
+  for (const tech of remaining) app.services.admin.updateUser(app.admin(), tech.id, { available: false });
+  const { incident } = app.services.incidentService.create(app.employee(), paymentReport);
+  assert.equal(incident.status, IncidentStatus.CLASSIFIED);
+  assert.equal(incident.assignedTechnician, null);
+  assert.ok(app.database.get("SELECT 1 FROM notifications WHERE type='UNASSIGNED_INCIDENT' AND incident_id=:id", { id: incident.id }));
+});
+
+test('P2 and P3 SLA targets are snapshotted in calendar minutes', (t) => {
+  const app = setup();
+  t.after(app.close);
+  const employee = app.employee();
+  for (const [urgency, priority, response, resolution] of [[3, 'P2', 15, 120], [2, 'P3', 60, 480]]) {
+    const { incident } = app.services.incidentService.create(employee, { ...paymentReport, impact: 2, urgency, affectedUsers: 1 });
+    assert.equal(incident.priority, priority);
+    assert.equal(Date.parse(incident.sla.responseDeadline) - Date.parse(incident.createdAt), response * 60_000);
+    assert.equal(Date.parse(incident.sla.resolutionDeadline) - Date.parse(incident.createdAt), resolution * 60_000);
+  }
+});
+
+test('similarity requires shared terms and respects incident ownership', (t) => {
+  const app = setup();
+  t.after(app.close);
+  const stranger = app.services.auth.createUser({ name: 'Other Reporter', email: 'other@example.test', password: 'DemoPassword123!' });
+  assert.deepEqual(app.services.incidentService.duplicates(paymentReport, stranger), []);
+  assert.deepEqual(app.services.incidentService.duplicates({ ...paymentReport, title: 'Printer cartridge', description: 'Toner replacement requested' }, app.employee()), []);
+  const { incident } = app.services.incidentService.create(stranger, { ...paymentReport, relatedIncidentIds: [seededIncident(app).id] });
+  assert.deepEqual(incident.related, []);
+});
+
+test('a rejected resolution returns to investigation and preserves the prior resolution in audit', (t) => {
+  const app = setup();
+  t.after(app.close);
+  const employee = app.employee();
+  const tech = app.technician();
+  const { incident } = app.services.incidentService.create(employee, paymentReport);
+  app.services.incidentService.acknowledge(tech, incident.id);
+  app.services.incidentService.startInvestigation(tech, incident.id);
+  app.services.incidentService.resolve(tech, incident.id, { resolution: 'Restarted the simulated payment worker.' });
+  const reopened = app.services.incidentService.rejectResolution(employee, incident.id, { message: 'Payments continue to fail.' });
+  assert.equal(reopened.status, IncidentStatus.IN_PROGRESS);
+  assert.equal(reopened.resolution, null);
+  assert.equal(reopened.sla.resolutionDeadline, incident.sla.resolutionDeadline);
+  assert.match(reopened.audit.find((event) => event.action === 'RESOLUTION_ARCHIVED').metadata.resolution, /Restarted/);
+});
+
+test('report filters handle UTC dates, categories and invalid input', (t) => {
+  const app = setup();
+  t.after(app.close);
+  assert.equal(app.services.reports.overview(app.admin(), { category: 4 }).totalIncidents, 1);
+  assert.equal(app.services.reports.overview(app.admin(), { to: '2000-01-01' }).totalIncidents, 0);
+  assert.throws(() => app.services.reports.overview(app.admin(), { from: '2026-02-30' }), { code: 'VALIDATION_ERROR' });
+});
+
+test('seed creates roles, incidents, audit history, and simulated email', () => {
+  const app = setup();
+  assert.equal(app.database.value('SELECT COUNT(*) FROM users'), 6);
+  assert.equal(app.database.value('SELECT COUNT(*) FROM incidents'), 4);
+  assert.ok(app.database.value('SELECT COUNT(*) FROM audit_events') >= 20);
+  assert.ok(app.database.value('SELECT COUNT(*) FROM simulated_emails') >= 10);
+  app.close();
+});
+
+test('public registration creates an employee account only', () => {
+  const app = setup(false);
+  const user = app.services.auth.createUser({ name: 'Taylor Test', email: 'taylor@example.test', password: 'SafePass123!' });
+  assert.equal(user.role, Roles.EMPLOYEE);
+  assert.throws(() => app.services.auth.createUser({ name: 'Bad Role', email: 'bad@example.test', password: 'SafePass123!', role: Roles.ADMINISTRATOR }), ForbiddenError);
+  app.close();
+});
+
+test('duplicate registration is rejected', () => {
+  const app = setup();
+  assert.throws(() => app.services.auth.createUser({ name: 'Riya Again', email: 'employee@aegis.local', password: 'SafePass123!' }), ConflictError);
+  app.close();
+});
+
+test('valid and invalid logins are handled securely', () => {
+  const app = setup();
+  const login = app.services.auth.login('employee@aegis.local', 'Employee@12345');
+  assert.match(login.token, /^[a-f0-9]{64}$/);
+  assert.equal(login.user.role, Roles.EMPLOYEE);
+  assert.throws(() => app.services.auth.login('employee@aegis.local', 'wrong-password'), UnauthorizedError);
+  app.close();
+});
+
+test('priority algorithm produces explainable P1 and P4 outcomes', () => {
+  const calculator = new PriorityCalculator();
+  const critical = calculator.calculate({ impact: 3, urgency: 3, businessCriticality: 3, affectedUsers: 700, serviceName: 'Payments' });
+  const low = calculator.calculate({ impact: 1, urgency: 1, businessCriticality: 1, affectedUsers: 1, serviceName: 'Wiki' });
+  assert.equal(critical.priority, 'P1');
+  assert.equal(low.priority, 'P4');
+  assert.match(critical.explanation, /score/i);
+});
+
+test('priority input bounds are validated', () => {
+  assert.throws(() => new PriorityCalculator().calculate({ impact: 0, urgency: 1, businessCriticality: 1 }), /impact/);
+});
+
+test('rule-based category suggestion explains matching keywords', () => {
+  const app = setup();
+  const suggestion = app.services.incidentService.categorySuggestion('VPN and DNS cannot connect to Wi-Fi', 'Network outage');
+  assert.equal(suggestion.category.name, 'Network');
+  assert.ok(suggestion.matchedKeywords.includes('vpn') || suggestion.matchedKeywords.includes('dns'));
+  app.close();
+});
+
+test('duplicate detector identifies a related payment incident', () => {
+  const app = setup();
+  const payment = app.database.get('SELECT id FROM it_services WHERE name=:name', { name: 'Payment Application' });
+  const category = app.database.get('SELECT id FROM categories WHERE name=:name', { name: 'Software/Application' });
+  const matches = app.services.incidentService.duplicates({ title: 'Payment application failing', description: 'Payments cannot be processed and the application is unavailable', serviceId: payment.id, categoryId: category.id });
+  assert.ok(matches.length > 0);
+  assert.ok(matches[0].score >= 25);
+  app.close();
+});
+
+test('skill-based assignment favours matching technician skills', () => {
+  const strategy = AssignmentStrategyFactory.create('SKILL_BASED');
+  const outcome = strategy.assign({ categoryName: 'Network', serviceName: 'Campus Network', technicians: [
+    { id: 1, name: 'Apps', active: 1, available: 1, capacity: 5, active_workload: 0, skills: '["application"]' },
+    { id: 2, name: 'Network', active: 1, available: 1, capacity: 5, active_workload: 2, skills: '["network","dns"]' },
+  ] });
+  assert.equal(outcome.technician.id, 2);
+});
+
+test('least-loaded assignment favours lowest workload with deterministic tie-break', () => {
+  const strategy = AssignmentStrategyFactory.create('LEAST_LOADED');
+  const outcome = strategy.assign({ technicians: [
+    { id: 1, name: 'Zara', active: 1, available: 1, capacity: 4, active_workload: 1 },
+    { id: 2, name: 'Alex', active: 1, available: 1, capacity: 4, active_workload: 1 },
+  ] });
+  assert.equal(outcome.technician.name, 'Alex');
+});
+
+test('incident creation assigns technician, records audit, notification, and SLA', () => {
+  const app = setup();
+  const employee = app.employee();
+  const service = app.database.get('SELECT id FROM it_services WHERE name=:name', { name: 'Campus Network' });
+  const category = app.database.get('SELECT id FROM categories WHERE name=:name', { name: 'Network' });
+  const result = app.services.incidentService.create(employee, { title: 'VPN disconnected for remote class', description: 'The VPN disconnects repeatedly while access to the campus network is required.', serviceId: service.id, categoryId: category.id, impact: 2, urgency: 3, affectedUsers: 40 });
+  assert.equal(result.incident.status, IncidentStatus.ASSIGNED);
+  assert.ok(result.incident.assignedTechnician);
+  assert.equal(result.incident.sla.responseMinutes, 15);
+  assert.ok(app.database.value('SELECT COUNT(*) FROM audit_events WHERE incident_id=:id', { id: result.incident.id }) >= 5);
+  assert.ok(app.database.value('SELECT COUNT(*) FROM notifications WHERE incident_id=:id', { id: result.incident.id }) >= 2);
+  app.close();
+});
+
+test('employee cannot read another employee private incident', () => {
+  const app = setup();
+  const other = app.services.auth.createUser({ name: 'Other Employee', email: 'other@example.test', password: 'SafePass123!' });
+  const actor = app.services.auth.actorForToken(app.services.auth.login(other.email, 'SafePass123!').token);
+  const incident = seededIncident(app);
+  assert.throws(() => app.services.incidentService.get(actor, incident.id), ForbiddenError);
+  app.close();
+});
+
+test('invalid lifecycle transition is rejected', () => {
+  const app = setup();
+  const incident = seededIncident(app, 'Campus Wi-Fi intermittent');
+  const tech = toPublicUser(app.database.get('SELECT * FROM users WHERE id=:id', { id: incident.assigned_technician_id }));
+  assert.equal(incident.status, IncidentStatus.IN_PROGRESS);
+  assert.throws(() => app.services.incidentService.acknowledge(tech, incident.id), LifecycleError);
+  app.close();
+});
+
+test('valid technician lifecycle produces resolution then reporter verification and close', () => {
+  const app = setup();
+  const employee = app.employee();
+  const incident = seededIncident(app, 'Campus Wi-Fi intermittent');
+  const tech = toPublicUser(app.database.get('SELECT * FROM users WHERE id=:id', { id: incident.assigned_technician_id }));
+  const resolved = app.services.incidentService.resolve(tech, incident.id, { resolution: 'Flushed the faulty resolver cache and confirmed Wi-Fi DNS recovery for affected users.' });
+  assert.equal(resolved.status, IncidentStatus.RESOLVED);
+  const verified = app.services.incidentService.verify(employee, incident.id, { note: 'Access works now.' });
+  assert.equal(verified.status, IncidentStatus.VERIFIED);
+  const closed = app.services.incidentService.close(employee, incident.id);
+  assert.equal(closed.status, IncidentStatus.CLOSED);
+  app.close();
+});
+
+test('technician notes and employee comments are persisted', () => {
+  const app = setup();
+  const incident = seededIncident(app, 'Campus Wi-Fi intermittent');
+  const tech = toPublicUser(app.database.get('SELECT * FROM users WHERE id=:id', { id: incident.assigned_technician_id }));
+  const employee = app.employee();
+  app.services.incidentService.addNote(tech, incident.id, { note: 'Captured new resolver telemetry.' });
+  const changed = app.services.incidentService.comment(employee, incident.id, { message: 'Issue still happens on the third floor.' });
+  assert.ok(changed.notes.some((note) => /telemetry/.test(note.note)));
+  assert.ok(changed.comments.some((comment) => /third floor/.test(comment.message)));
+  app.close();
+});
+
+test('SLA monitor records each breach only once', () => {
+  const app = setup();
+  const first = app.services.incidentService.monitorSla();
+  const count = app.database.value('SELECT COUNT(*) FROM sla_breaches');
+  const second = app.services.incidentService.monitorSla();
+  assert.ok(first.scanned > 0);
+  assert.equal(app.database.value('SELECT COUNT(*) FROM sla_breaches'), count);
+  assert.equal(second.breaches, 0);
+  app.close();
+});
+
+test('admin configuration persists assignment strategy selection', () => {
+  const app = setup();
+  const admin = app.admin();
+  const changed = app.services.admin.updateAssignmentStrategy(admin, { strategy: 'LEAST_LOADED' });
+  assert.equal(changed.current, 'LEAST_LOADED');
+  assert.equal(app.services.incidentService.configuration('assignment_strategy'), 'LEAST_LOADED');
+  app.close();
+});
+
+test('admin can manage technician capacity while ordinary employee cannot', () => {
+  const app = setup();
+  const admin = app.admin();
+  const tech = app.services.admin.technicians(admin)[0];
+  const changed = app.services.admin.updateUser(admin, tech.id, { capacity: 9, available: false });
+  assert.equal(changed.capacity, 9);
+  assert.equal(changed.available, false);
+  assert.throws(() => app.services.admin.technicians(app.employee()), ForbiddenError);
+  app.close();
+});
+
+test('search and compound filters return only matching records', () => {
+  const app = setup();
+  const employee = app.employee();
+  const result = app.services.incidentService.list(employee, { q: 'payment', priority: 'P1', pageSize: 20 });
+  assert.equal(result.total, 1);
+  assert.match(result.items[0].title, /payment/i);
+  app.close();
+});
+
+test('reports derive data from persisted incident records', () => {
+  const app = setup();
+  const report = app.services.reports.overview(app.admin());
+  assert.equal(report.totalIncidents, 4);
+  assert.ok(report.byPriority.length > 0);
+  assert.ok(report.recentActivity.length > 0);
+  app.close();
+});
+
+test('closed incident accepts one feedback submission only', () => {
+  const app = setup();
+  const incident = seededIncident(app, 'Scheduled database backup failure');
+  assert.equal(incident.status, IncidentStatus.CLOSED);
+  assert.throws(() => app.services.incidentService.feedback(app.employee(), incident.id, { rating: 4, comment: 'Again' }), ConflictError);
+  app.close();
+});
+
+test('service dependency cycles are rejected', () => {
+  const app = setup();
+  const admin = app.admin();
+  const payment = app.database.get('SELECT id FROM it_services WHERE name=:name', { name: 'Payment Application' });
+  const auth = app.database.get('SELECT id FROM it_services WHERE name=:name', { name: 'Authentication Service' });
+  assert.throws(() => app.services.admin.addDependency(admin, { serviceId: auth.id, dependsOnServiceId: payment.id }), ConflictError);
+  app.close();
+});
+
+test('SQLite persistence survives a database reopen', () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'aegis-test-'));
+  const filename = path.join(directory, 'aegis.db');
+  const first = new AegisDatabase(filename);
+  const services = createServices({ database: first });
+  seedDemoData({ database: first, services });
+  const count = first.value('SELECT COUNT(*) FROM incidents');
+  first.close();
+  const second = new AegisDatabase(filename);
+  assert.equal(second.value('SELECT COUNT(*) FROM incidents'), count);
+  second.close();
+  fs.rmSync(directory, { recursive: true, force: true });
+});
+
+test('HTTP API health, login, and private incident enforcement work together', async () => {
+  const app = createApplication({ databasePath: ':memory:', seed: true });
+  const server = http.createServer(app.handler);
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const base = `http://127.0.0.1:${server.address().port}`;
+  const health = await fetch(`${base}/api/health`).then((response) => response.json());
+  assert.equal(health.status, 'ok');
+  assert.equal((await fetch(`${base}/api/incidents`)).status, 401);
+  const login = await fetch(`${base}/api/auth/login`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email: 'employee@aegis.local', password: 'Employee@12345' }) }).then((response) => response.json());
+  const list = await fetch(`${base}/api/incidents`, { headers: { Authorization: `Bearer ${login.token}` } }).then((response) => response.json());
+  assert.ok(list.total > 0);
+  const denied = await fetch(`${base}/api/admin/users`, { headers: { Authorization: `Bearer ${login.token}` } });
+  assert.equal(denied.status, 403);
+  await new Promise((resolve) => server.close(resolve));
+  app.close();
+});

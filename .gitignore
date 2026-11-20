@@ -1,0 +1,21 @@
+# Runtime and generated files
+node_modules/
+coverage/
+.nyc_output/
+backend/data/*.db
+backend/data/*.db-*
+backend/data/*.db.*
+backend/data/*.sqlite
+*.log
+.env
+.env.local
+dist/
+build/
+target/
+
+# Editors and operating systems
+.vscode/
+.idea/
+*.iml
+Thumbs.db
+.DS_Store
