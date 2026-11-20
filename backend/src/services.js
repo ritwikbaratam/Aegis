@@ -6,6 +6,7 @@ import {
   DomainError,
   DuplicateDetector,
   ForbiddenError,
+  HistoricalFixMatcher,
   IncidentFactory,
   IncidentLifecycle,
   IncidentStatus,
@@ -31,6 +32,8 @@ import { IncidentRepository, UserRepository } from './database.js';
 const SYSTEM_ACTOR = Object.freeze({ id: null, role: 'SYSTEM', name: 'AEGIS SLA monitor' });
 const ACTIVE_STATUSES = [IncidentStatus.NEW, IncidentStatus.CLASSIFIED, IncidentStatus.ASSIGNED, IncidentStatus.ACKNOWLEDGED, IncidentStatus.IN_PROGRESS, IncidentStatus.WAITING_FOR_INFORMATION];
 const closedStatuses = [IncidentStatus.RESOLVED, IncidentStatus.VERIFIED, IncidentStatus.CLOSED];
+const rescueOrder = ['OVERDUE', 'BREACHED', 'CRITICAL', 'APPROACHING', 'UNASSIGNED', 'ON_TRACK'];
+const reminderKey = (incidentId, target, technicianId) => `${incidentId}:${target}:${technicianId}`;
 const asBool = (value) => value === true || value === 1 || value === '1' || value === 'true';
 const toId = (value, name = 'ID') => {
   const id = Number(value);
@@ -181,6 +184,7 @@ export class IncidentService {
     this.factory = new IncidentFactory(this.priorityCalculator, clock);
     this.categorySuggester = new CategorySuggester();
     this.duplicateDetector = new DuplicateDetector();
+    this.fixMatcher = new HistoricalFixMatcher();
     this.riskPredictor = new SlaRiskPredictor();
   }
 
@@ -318,11 +322,11 @@ export class IncidentService {
   slaStatus(incident, now = this.clock()) {
     if (incident.response_breached || incident.resolution_breached) return 'BREACHED';
     if (incident.resolved_at) return 'MET';
-    const responseDeadline = new Date(incident.response_deadline).getTime();
-    const resolutionDeadline = new Date(incident.resolution_deadline).getTime();
-    const responseWarningAt = responseDeadline - Number(incident.response_minutes) * 60_000 * 0.2;
-    const resolutionWarningAt = resolutionDeadline - Number(incident.resolution_minutes) * 60_000 * 0.2;
-    if ((!incident.acknowledged_at && now.getTime() >= responseWarningAt) || now.getTime() >= resolutionWarningAt) return 'AT_RISK';
+    const pendingRisk = ['response', 'resolution'].some((kind) => {
+      const target = this.riskPredictor.target(incident, kind, now);
+      return !target.completedAt && (target.approaching || target.overdue);
+    });
+    if (pendingRisk) return 'AT_RISK';
     return 'ON_TRACK';
   }
 
@@ -652,25 +656,22 @@ export class IncidentService {
     const rows = this.db.all(`SELECT * FROM incidents WHERE status NOT IN ('CLOSED') ORDER BY id`);
     const outcomes = { scanned: rows.length, warnings: 0, breaches: 0, escalations: 0 };
     for (const incident of rows) {
-      const responseDeadline = new Date(incident.response_deadline).getTime();
-      const resolutionDeadline = new Date(incident.resolution_deadline).getTime();
-      const responseWarningAt = responseDeadline - Number(incident.response_minutes) * 60_000 * 0.2;
-      const resolutionWarningAt = resolutionDeadline - Number(incident.resolution_minutes) * 60_000 * 0.2;
-      if (!incident.acknowledged_at && now.getTime() >= responseWarningAt && !incident.response_warning_sent && now.getTime() < responseDeadline) {
+      const response = this.riskPredictor.target(incident, 'response', now);
+      const resolution = this.riskPredictor.target(incident, 'resolution', now);
+      if (response.approaching && response.remaining > 0 && !incident.response_warning_sent) {
         this.db.run('UPDATE incidents SET response_warning_sent=1 WHERE id=:id', { id: incident.id });
         this.audit.record({ incidentId: incident.id, action: 'SLA_WARNING_GENERATED', description: 'Response SLA is approaching.' });
         this.notify({ recipients: [incident.assigned_technician_id, ...this.admins()].filter(Boolean), incidentId: incident.id, type: 'SLA_WARNING', subject: `${incident.incident_code} response SLA at risk`, message: 'The response deadline is approaching.' });
         outcomes.warnings += 1;
       }
-      if (now.getTime() >= resolutionWarningAt && !incident.resolution_warning_sent && now.getTime() < resolutionDeadline && ACTIVE_STATUSES.includes(incident.status)) {
+      if (resolution.approaching && resolution.remaining > 0 && !incident.resolution_warning_sent && ACTIVE_STATUSES.includes(incident.status)) {
         this.db.run('UPDATE incidents SET resolution_warning_sent=1 WHERE id=:id', { id: incident.id });
         this.audit.record({ incidentId: incident.id, action: 'SLA_WARNING_GENERATED', description: 'Resolution SLA is approaching.' });
         this.notify({ recipients: [incident.assigned_technician_id, ...this.admins()].filter(Boolean), incidentId: incident.id, type: 'SLA_WARNING', subject: `${incident.incident_code} resolution SLA at risk`, message: 'The resolution deadline is approaching.' });
         outcomes.warnings += 1;
       }
-      if (!incident.acknowledged_at && now.getTime() > responseDeadline && this.recordBreach(incident, 'RESPONSE')) outcomes.breaches += 1;
-      const resolvedTime = incident.resolved_at ? new Date(incident.resolved_at).getTime() : now.getTime();
-      if (resolvedTime > resolutionDeadline && !incident.resolution_breached && this.recordBreach(incident, 'RESOLUTION')) outcomes.breaches += 1;
+      if (!response.completedAt && response.overdue && this.recordBreach(incident, 'RESPONSE')) outcomes.breaches += 1;
+      if (resolution.overdue && this.recordBreach(incident, 'RESOLUTION')) outcomes.breaches += 1;
       const risk = this.riskPredictor.assess(incident, now);
       if (risk.level === 'HIGH' && incident.priority === 'P1' && !incident.acknowledged_at && this.escalate(incident, 1, risk.explanation, 'Support team lead')) outcomes.escalations += 1;
     }
@@ -681,14 +682,73 @@ export class IncidentService {
     const incident = this.incidents.byId(id);
     if (!incident) throw new NotFoundError('Incident');
     this.assertCanView(actor, incident);
-    const current = this.hydrate(incident.id, actor, true);
-    if (actor.role === Roles.EMPLOYEE) return { incident: current.incidentCode, recommendations: [] };
-    const past = this.db.all(`SELECT i.*, c.name AS category_name, s.name AS service_name FROM incidents i
-      LEFT JOIN categories c ON c.id=i.category_id JOIN it_services s ON s.id=i.service_id
-      WHERE i.status IN ('RESOLVED','VERIFIED','CLOSED') AND i.resolution_description IS NOT NULL AND i.id<>:id ORDER BY i.resolved_at DESC LIMIT 50`, { id: incident.id });
-    const matches = past.map((entry) => ({ incident: { title: entry.title }, ...this.duplicateDetector.compare({ title: incident.title, description: incident.description, serviceId: incident.service_id, categoryId: incident.category_id }, entry), resolution: entry.resolution_description }))
-      .filter((entry) => entry.score >= 30).sort((a, b) => b.score - a.score).slice(0, 5);
-    return { incident: current.incidentCode, recommendations: matches };
+    if (actor.role === Roles.EMPLOYEE) return { incident: incident.incident_code, recommendations: [], guidance: null };
+    const past = this.incidents.historicalFixes(incident.id, this.isAdmin(actor) ? null : actor.id);
+    const recommendations = this.fixMatcher.rank(incident, past);
+    const guidance = recommendations.length ? null : this.fixMatcher.guidance({
+      ...incident, category_name: this.db.get('SELECT name FROM categories WHERE id=:id', { id: incident.category_id })?.name,
+    });
+    return { incident: incident.incident_code, recommendations, guidance };
+  }
+
+  rescueQueue(actor) {
+    assertRole(actor, Roles.ADMINISTRATOR);
+    const now = this.clock();
+    const reminders = new Set(this.incidents.rescueReminders()
+      .map((row) => reminderKey(row.incident_id, row.target, row.technician_id)));
+    const items = this.incidents.activeForRescue().map((incident) => {
+      const { risk, deadline, reason } = this.riskPredictor.rescue(incident, now);
+      const technician = incident.assigned_technician_id
+        ? { id: incident.assigned_technician_id, name: incident.technician_name }
+        : null;
+      const reminderSent = reminders.has(reminderKey(incident.id, deadline.kind, technician?.id));
+      let suggestedAction = 'Review progress at the next update.';
+      if (risk !== 'ON_TRACK') {
+        if (!incident.technician_active) suggestedAction = 'Review availability and assign a qualified technician from the incident.';
+        else if (risk === 'OVERDUE' && incident.escalation_level < 2) suggestedAction = 'Run the SLA monitor to record the breach and escalate. Contact the assigned technician for an update.';
+        else if (incident.escalation_level >= 2 && ['OVERDUE', 'BREACHED'].includes(risk)) suggestedAction = 'Review the existing escalation and agree on the next update with the assigned technician.';
+        else if (!incident.acknowledged_at) suggestedAction = 'Ask the assigned technician to acknowledge the incident.';
+        else if (incident.status === IncidentStatus.WAITING_FOR_INFORMATION) suggestedAction = 'Check whether the reporter has replied and ask the technician what is blocking progress.';
+        else suggestedAction = 'Check investigation progress and ask the technician for a recovery update.';
+      }
+      return {
+        id: incident.id, incidentCode: incident.incident_code, title: incident.title, priority: incident.priority,
+        assignedTechnician: technician, deadline: deadline.deadline, deadlineKind: deadline.kind,
+        risk, reason, suggestedAction, reminderSent,
+        canRemind: risk !== 'ON_TRACK' && Boolean(incident.technician_active) && !reminderSent,
+      };
+    });
+    items.sort((a, b) => rescueOrder.indexOf(a.risk) - rescueOrder.indexOf(b.risk)
+      || a.priority.localeCompare(b.priority) || a.deadline.localeCompare(b.deadline) || a.id - b.id);
+    return { evaluatedAt: now.toISOString(), items };
+  }
+
+  remindForRescue(actor, id, input) {
+    assertRole(actor, Roles.ADMINISTRATOR);
+    const { target, technicianId } = input ?? {};
+    return this.db.transaction(() => {
+      const incident = this.incidents.byId(id);
+      if (!incident) throw new NotFoundError('Incident');
+      if (!ACTIVE_STATUSES.includes(incident.status)) throw new ConflictError('Rescue reminders require an active incident');
+      const assigned = this.users.byId(incident.assigned_technician_id);
+      const { risk, deadline } = this.riskPredictor.rescue(incident, this.clock());
+      if (risk === 'ON_TRACK' || !assigned?.active || assigned.role !== Roles.TECHNICIAN) {
+        throw new ConflictError('There is no assigned technician to remind for a current SLA risk');
+      }
+      if (target !== deadline.kind || technicianId !== assigned.id) {
+        throw new ConflictError('The SLA target or assigned technician changed. Refresh the rescue queue.');
+      }
+      if (this.incidents.rescueReminders(incident.id).some((row) => row.target === target)) {
+        return { sent: false };
+      }
+      this.audit.record({ incidentId: incident.id, actor, action: 'SLA_RESCUE_REMINDER',
+        description: `Requested a ${target} SLA update from the assigned technician.`,
+        metadata: { target, technicianId: assigned.id } });
+      this.notify({ recipients: [assigned.id], incidentId: incident.id, type: 'SLA_RESCUE_REMINDER',
+        subject: `${incident.incident_code} needs an SLA update`,
+        message: `An administrator requested a ${target} SLA update. Review the incident and confirm the next step.` });
+      return { sent: true };
+    });
   }
 }
 

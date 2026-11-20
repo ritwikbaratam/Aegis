@@ -23,6 +23,8 @@
   --accent-soft: color-mix(in srgb, var(--accent) 13%, transparent);
   --accent-border: color-mix(in srgb, var(--accent) 34%, transparent);
   --input-surface: light-dark(#f8faff, #0b1829);
+  --campus-photo: url("/assets/bits-hyderabad.jpg");
+  --campus-scrim: light-dark(#eaf2fc, #0a1628);
   --radius: 16px;
   --radius-sm: 10px;
   font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
@@ -48,9 +50,12 @@ svg { display: block; }
 .skip-link:focus { top: 12px; }
 .screen-reader-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border: 0; }
 
-.auth-shell { min-height: 100dvh; display: grid; grid-template-columns: minmax(0, 1.17fr) minmax(0, .83fr); }
-.auth-intro { min-width: 0; min-height: 100dvh; padding: clamp(2rem, 6.2vw, 6rem); display: flex; flex-direction: column; position: relative; isolation: isolate; overflow: hidden; background: radial-gradient(ellipse at 70% 20%, var(--accent-soft), transparent 70%), linear-gradient(150deg, var(--surface-2), var(--canvas)); }
-.auth-intro::after { content: ""; position: absolute; z-index: -1; width: 33rem; aspect-ratio: 1; border: 1px solid var(--accent-border); border-radius: 50%; inset-inline-end: -10rem; bottom: -17rem; box-shadow: 0 0 0 4rem var(--accent-soft), 0 0 0 8rem color-mix(in srgb, var(--accent) 6%, transparent); pointer-events: none; }
+.auth-shell {
+  min-height: 100dvh; display: grid; grid-template-columns: minmax(0, 1.17fr) minmax(0, .83fr);
+  background: linear-gradient(90deg, var(--campus-scrim), color-mix(in srgb, var(--campus-scrim) 68%, transparent) 36%, #10213c40 67%),
+    var(--campus-photo) center 42% / cover no-repeat var(--canvas-soft);
+}
+.auth-intro { min-width: 0; min-height: 100dvh; padding: clamp(2rem, 6.2vw, 6rem); display: flex; flex-direction: column; background: linear-gradient(0deg, color-mix(in srgb, var(--campus-scrim) 70%, transparent), transparent 42%); }
 .brand { display: inline-flex; width: fit-content; align-items: center; gap: .75rem; color: var(--ink); }
 .brand-text { display: grid; justify-items: start; gap: .16rem; }
 .brand .bits-wordmark { color: var(--ink); }
@@ -62,8 +67,8 @@ svg { display: block; }
 .auth-campus-note { color: var(--muted); font-size: .875rem; margin: 0; }
 
 
-.auth-card-wrap { min-height: 100dvh; display: grid; place-items: center; padding: 2rem; background: var(--canvas-soft); }
-.auth-card { width: min(100%, 450px); padding: clamp(1.5rem, 4vw, 2.75rem); background: var(--surface); border: 1px solid var(--border); border-radius: 22px; box-shadow: var(--shadow);  }
+.auth-card-wrap { min-height: 100dvh; display: grid; place-items: center; padding: 2rem; background: color-mix(in srgb, var(--campus-scrim) 54%, transparent); }
+.auth-card { width: min(100%, 450px); padding: clamp(1.5rem, 4vw, 2.75rem); background: color-mix(in srgb, var(--surface) 89%, transparent); backdrop-filter: blur(12px); border: 1px solid var(--border-strong); border-radius: 22px; box-shadow: var(--shadow); }
 .auth-card h2 { margin: .75rem 0 .25rem; letter-spacing: -.025em; font-size: 1.7rem; }
 .auth-card > p { margin-top: 0; color: var(--muted); }
 .auth-footer { margin: 1.2rem 0 0; color: var(--muted); font-size: .9rem; text-align: center; }
@@ -244,8 +249,8 @@ a.list-row:hover { background: var(--accent-soft); border-radius: .5rem; }
 
 /* Campus identity. The JPEG is displayed as supplied, including its black background. */
 .bits-logo { display: block; width: 3rem; height: 3rem; flex: 0 0 auto; object-fit: contain; border-radius: .3rem; }
-.bits-wordmark { display: inline-flex; align-items: baseline; gap: .035em; padding-block-start: .12em; font-size: var(--wordmark-size, 1.75rem); font-weight: 825; line-height: .96; letter-spacing: .08em; }
-.bits-wordmark .raised { position: relative; inset-block-start: -.11em; }
+.bits-wordmark { display: inline-flex; align-items: baseline; gap: .025em; font-size: var(--wordmark-size, 1.75rem); font-weight: 730; line-height: 1; letter-spacing: .07em; }
+.bits-wordmark .emphasis { color: color-mix(in srgb, var(--ink) 60%, var(--accent)); font-weight: 900; }
 .brand-subtitle { color: var(--muted); font-size: .8125rem; font-weight: 650; line-height: 1.15; }
 .brand-sidebar { --wordmark-size: 1.62rem; }
 .brand-sidebar .bits-logo { width: 2.55rem; height: 2.55rem; }
@@ -259,6 +264,38 @@ a.list-row:hover { background: var(--accent-soft); border-radius: .5rem; }
 .support-page > h2 { margin-top: 1.5rem; }
 .support-guide { display: grid; gap: .9rem; max-width: 46rem; }
 .support-link { color: var(--accent); }
+
+.campus-dashboard {
+  min-height: 7.75rem; padding: clamp(1rem, 2.6vw, 1.65rem); align-items: center;
+  border: 1px solid var(--border); border-radius: var(--radius);
+  background: linear-gradient(90deg, var(--surface) 24%, color-mix(in srgb, var(--surface) 96%, transparent) 48%, color-mix(in srgb, var(--surface) 82%, transparent)),
+    var(--campus-photo) right 40% / min(100%, 51rem) auto no-repeat var(--surface);
+}
+
+.fix-list, .rescue-list { display: grid; gap: .75rem; }
+.fix-card { min-width: 0; padding: .9rem 1rem; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--surface-2); overflow-wrap: anywhere; }
+.fix-header { display: flex; align-items: baseline; justify-content: space-between; flex-wrap: wrap; gap: .25rem .8rem; }
+.fix-card h4, .rescue-card h2 { margin: 0; font-size: 1rem; }
+.fix-score { color: var(--accent); font-size: .875rem; font-weight: 725; font-variant-numeric: tabular-nums; }
+.fix-context { margin: .15rem 0; color: var(--subtle); font-size: .875rem; }
+.fix-resolution { margin: .7rem 0; }
+.fix-explanation { padding-top: .55rem; border-top: 1px solid var(--border); }
+.fix-explanation, .fix-card ul { margin-bottom: 0; color: var(--muted); font-size: .9rem; }
+.fix-card ul { padding-left: 1.2rem; }
+.rescue-toolbar, .rescue-filters, .rescue-badges { display: flex; align-items: center; flex-wrap: wrap; gap: .45rem; }
+.rescue-toolbar { justify-content: space-between; margin-bottom: .85rem; }
+.rescue-toolbar p { margin: 0; }
+.rescue-filters [aria-current] { border-color: var(--accent-border); background: var(--accent-soft); color: var(--accent); }
+.rescue-card { display: grid; grid-template-columns: minmax(0, .9fr) minmax(9rem, .6fr) minmax(0, 1.4fr); gap: 1rem; padding: 1rem 1.15rem; overflow-wrap: anywhere; }
+.rescue-incident .incident-id { margin: 0 0 .2rem; }
+.rescue-deadline { display: grid; align-content: start; gap: .15rem; font-size: .875rem; }
+.rescue-deadline time { color: var(--subtle); }
+.rescue-badges { margin-bottom: .28rem; }
+.rescue-countdown { color: var(--ink); font-weight: 700; font-variant-numeric: tabular-nums; }
+.rescue-action { font-size: .9rem; color: var(--muted); }
+.rescue-action p { margin: 0 0 .4rem; }
+.rescue-action strong { color: var(--ink); }
+.reminder-state { color: var(--green); font-weight: 700; }
 
 /* Account disclosure: regular links and buttons, with arrow-key shortcuts. */
 .account-control { position: relative; }
@@ -348,7 +385,9 @@ a.list-row:hover { background: var(--accent-soft); border-radius: .5rem; }
   .app-shell { grid-template-columns: minmax(0, 1fr); }
   .sidebar-close { display: inline-grid; }
   .nav-open .nav-scrim { display: block; position: fixed; inset: 0; background: #061021a0; z-index: 9; }
-  .auth-intro { padding: 1.65rem; }
+  .auth-shell { background: var(--canvas-soft); }
+  .auth-intro { padding: 1.65rem; background: linear-gradient(90deg, color-mix(in srgb, var(--campus-scrim) 95%, transparent), color-mix(in srgb, var(--campus-scrim) 62%, transparent)), var(--campus-photo) center 39% / cover no-repeat var(--canvas-soft); }
+  .auth-card-wrap { background: var(--canvas-soft); }
   .auth-copy { padding: 1.5rem 0 0; }
   .auth-copy h1 { max-width: 20ch; font-size: 2.45rem; }
   .auth-campus-note { margin-top: 1rem; }
@@ -371,6 +410,8 @@ a.list-row:hover { background: var(--accent-soft); border-radius: .5rem; }
   .quick-report span:last-child { display: none; }
   .quick-report span:first-child { font-size: 1.05rem; }
   .donut-wrap { flex-wrap: wrap; }
+  .campus-dashboard { align-items: flex-start; }
+  .rescue-card { grid-template-columns: minmax(0, 1fr); gap: .65rem; }
 }
 @media (max-width: 350px) {
   .topbar-actions { gap: .25rem; }

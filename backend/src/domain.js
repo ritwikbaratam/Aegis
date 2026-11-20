@@ -265,16 +265,166 @@ export class DuplicateDetector {
   }
 }
 
+const FIX_STOP_WORDS = new Set([...STOP_WORDS, 'after', 'before', 'error', 'errors', 'issue', 'issues', 'problem',
+  'problems', 'help', 'need', 'still', 'work', 'working', 'user', 'users', 'student', 'students', 'staff',
+  'again', 'since', 'when', 'while', 'has', 'have', 'was', 'were', 'today', 'redacted']);
+const FIX_SYMPTOMS = new Set(['wifi', 'dns', 'vpn', 'dhcp', 'login', 'mfa', 'sso', 'latency', 'timeout', 'crash',
+  'backup', 'payment', 'outage', 'disconnect']);
+
+function safeKnowledgeText(value = '') {
+  return (value ?? '')
+    .replace(/-----BEGIN [^-]*PRIVATE KEY-----[\s\S]*?-----END [^-]*PRIVATE KEY-----/gi, '[redacted]')
+    .replace(/\b(?:https?:\/\/|www\.)\S+/gi, '[redacted]')
+    .replace(/\b[\w.+-]+@[\w.-]+\.[a-z]{2,}\b/gi, '[redacted]')
+    .replace(/\bBearer\s+\S+/gi, '[redacted]')
+    .replace(/\b(?:password|passphrase|passcode|pin|otp|mfa code|verification code|recovery code|secret|(?:api|private) key|(?:access |session |refresh )?token)\s*(?:[:=]|\bis\b|\bto\b)\s*(?:"[^"]*"|'[^']*'|[^\s,;]+)/gi, '[redacted]')
+    .replace(/\b[a-f0-9]{24,}\b/gi, '[redacted]')
+    .replace(/\s+/g, ' ').trim();
+}
+
+function fixWords(text) {
+  return normaliseText(safeKnowledgeText(text).normalize('NFKD').replace(/\p{M}/gu, ''))
+    .replace(/\b(?:wi fi|wireless)\b/g, 'wifi')
+    .replace(/\b(?:sign in|log in|signin|logins)\b/g, 'login')
+    .replace(/\b(?:multi factor authentication|two factor authentication|2fa)\b/g, 'mfa')
+    .replace(/\b(?:disconnects|disconnected|disconnecting|disconnections?)\b/g, 'disconnect')
+    .replace(/\b(?:timed out|time outs|timeouts?)\b/g, 'timeout')
+    .replace(/\b(?:crashed|crashes|crashing)\b/g, 'crash')
+    .split(' ').filter((word) => word.length > 2 && !FIX_STOP_WORDS.has(word) && /[a-z]/.test(word));
+}
+
+function fixTerms(incident) {
+  const title = fixWords(incident.title);
+  const description = fixWords(incident.description);
+  const phrases = [title, description].flatMap((words) => words.slice(1).map((word, i) => `${words[i]} ${word}`));
+  return { title: new Set(title), symptoms: new Set([...title, ...description]), phrases: new Set(phrases) };
+}
+
+function jaccard(a, b, intersection) {
+  return intersection / Math.max(1, a.size + b.size - intersection);
+}
+
+/** Ranks permitted historical resolutions by lexical evidence and incident context. */
+export class HistoricalFixMatcher {
+  rank(current, candidates) {
+    const source = fixTerms(current);
+    const matches = [];
+    for (const candidate of candidates) {
+      const resolution = safeKnowledgeText(candidate.resolution_description);
+      const resolutionWords = new Set(fixWords(resolution));
+      if (resolutionWords.size < 3 || /^(?:n\/?a|none|unknown|resolved|fixed|done|no (?:fix|resolution)(?: (?:details|available|recorded))?|not applicable)[.! ]*$/i.test(resolution)) continue;
+      const past = fixTerms(candidate);
+      const shared = [...source.symptoms].filter((word) => past.symptoms.has(word));
+      const phrases = [...source.phrases].filter((phrase) => past.phrases.has(phrase));
+      if (shared.length < 2 && !shared.some((word) => FIX_SYMPTOMS.has(word))) continue;
+      const titles = [...source.title].filter((word) => past.title.has(word));
+      const fixOverlap = [...source.symptoms].filter((word) => resolutionWords.has(word)).length;
+      const serviceMatch = current.service_id != null && current.service_id === candidate.service_id;
+      const categoryMatch = current.category_id != null && current.category_id === candidate.category_id;
+      const score = Math.round(45 * jaccard(source.symptoms, past.symptoms, shared.length)
+        + 15 * jaccard(source.title, past.title, titles.length)
+        + 15 * jaccard(source.phrases, past.phrases, phrases.length)
+        + 10 * fixOverlap / Math.max(1, source.symptoms.size)
+        + (serviceMatch ? 10 : 0) + (categoryMatch ? 5 : 0));
+      if (score < 26) continue;
+      const reasons = [`Shared symptoms include ${shared.slice(0, 5).join(', ')}.`];
+      if (phrases.length) reasons.push(`Matching phrases include ${phrases.slice(0, 3).join(', ')}.`);
+      if (serviceMatch) reasons.push('Same affected IT service.');
+      if (categoryMatch) reasons.push('Same incident category.');
+      if (fixOverlap) reasons.push('The previous resolution mentions current symptoms.');
+      matches.push({
+        incident: { id: candidate.id, title: safeKnowledgeText(candidate.title), service: candidate.service_name, category: candidate.category_name },
+        resolution: resolution.length > 360 ? `${resolution.slice(0, 357).trimEnd()}…` : resolution,
+        score, explanation: reasons.join(' '),
+      });
+    }
+    // The repository supplies newest resolutions first, so stable sorting preserves that tie-break.
+    return matches.sort((a, b) => b.score - a.score).slice(0, 4);
+  }
+
+  guidance(incident) {
+    const category = normaliseText(incident.category_name ?? '');
+    const symptoms = new Set(fixWords(`${incident.title ?? ''} ${incident.description ?? ''}`));
+    const topic = ['network', 'authentication'].includes(category) ? category
+      : ['wifi', 'dns', 'vpn'].some((word) => symptoms.has(word)) ? 'network'
+      : ['login', 'mfa', 'sso'].some((word) => symptoms.has(word)) ? 'authentication' : 'service';
+    if (topic === 'network') {
+      return { title: 'Network troubleshooting', steps: [
+        'Check whether multiple users or locations are affected.',
+        'Check connectivity and network sign-in status on an affected device.',
+        'Check the service status for a wider outage.',
+      ] };
+    }
+    if (topic === 'authentication') {
+      return { title: 'Sign-in troubleshooting', steps: [
+        'Confirm the user is signing in with the expected campus account.',
+        'Check authentication service availability and note the exact error.',
+        'Follow the approved password-reset process if account recovery is needed.',
+      ] };
+    }
+    return { title: 'Service troubleshooting', steps: [
+      'Check whether the affected service is available.',
+      'Record the exact error message and when it occurred.',
+      'Confirm whether the issue affects more than one user or device.',
+    ] };
+  }
+}
+
 export class SlaRiskPredictor {
+  target(incident, kind, now) {
+    const deadline = incident[`${kind}_deadline`];
+    const completedAt = kind === 'response' ? incident.acknowledged_at : incident.resolved_at;
+    const end = Date.parse(deadline);
+    const remaining = end - now.getTime();
+    const recorded = Boolean(incident[`${kind}_breached`]);
+    const overdue = (completedAt ? Date.parse(completedAt) > end : remaining < 0);
+    const warningWindow = Number(incident[`${kind}_minutes`]) * 60_000 * 0.2;
+    const approaching = !completedAt && remaining >= 0 && remaining <= warningWindow;
+    return { kind, deadline, completedAt, remaining, overdue, recorded, approaching };
+  }
+
+  rescue(incident, now) {
+    const targets = ['response', 'resolution'].map((kind) => this.target(incident, kind, now));
+    const pending = targets.filter((target) => !target.completedAt)
+      .sort((a, b) => a.remaining - b.remaining);
+    const deadline = pending[0] ?? targets[1];
+    const recorded = targets.some((target) => target.recorded || (target.completedAt && target.overdue));
+    const needsAssignment = !incident.assigned_technician_id || incident.technician_active === 0;
+    const risk = pending.some((target) => target.overdue) ? 'OVERDUE'
+      : recorded ? 'BREACHED'
+      : incident.priority === 'P1' ? 'CRITICAL'
+      : pending.some((target) => target.approaching) ? 'APPROACHING'
+      : needsAssignment ? 'UNASSIGNED' : 'ON_TRACK';
+    const reasons = [];
+    for (const target of targets) {
+      const label = target.kind === 'response' ? 'Response' : 'Resolution';
+      if (target.completedAt && target.overdue) {
+        reasons.push(target.kind === 'response' ? 'Acknowledgement occurred after the response deadline.' : 'Resolution occurred after its deadline.');
+      } else if (!target.completedAt && target.overdue) {
+        reasons.push(`${label} deadline has passed${target.recorded ? ' and a breach is recorded' : ''}.`);
+      } else if (target.approaching) {
+        reasons.push(target.remaining === 0 ? `${label} is due now.` : `${label} is in the final 20% of its SLA window.`);
+      } else if (target.recorded) {
+        reasons.push(`A ${target.kind} breach was previously recorded.`);
+      }
+    }
+    if (!incident.acknowledged_at) reasons.push('Technician acknowledgement is pending.');
+    if (!incident.assigned_technician_id) reasons.push('No technician is assigned.');
+    else if (needsAssignment) reasons.push('The assigned technician account is inactive.');
+    if (risk === 'CRITICAL') reasons.push('P1 incidents require immediate review.');
+    if (risk === 'ON_TRACK') reasons.unshift('The next deadline is within its SLA window.');
+    return { risk, deadline, reason: reasons.join(' ') };
+  }
+
   assess(incident, now = new Date()) {
     if (incident.response_breached || incident.resolution_breached) return { level: 'BREACHED', explanation: 'An SLA breach has already been recorded for this incident.' };
     if (incident.resolved_at) return { level: 'LOW', explanation: 'The incident was resolved without a recorded SLA breach.' };
-    const remaining = new Date(incident.resolution_deadline).getTime() - now.getTime();
+    const { remaining, overdue } = this.target(incident, 'resolution', now);
     const total = Math.max(1, Number(incident.resolution_minutes) * 60_000);
     const ratio = remaining / total;
     let level = 'LOW';
     const reasons = [];
-    if (remaining <= 0) return { level: 'BREACHED', explanation: 'The resolution deadline has passed; the monitor will record the breach.' };
+    if (overdue) return { level: 'BREACHED', explanation: 'The resolution deadline has passed. The monitor will record the breach.' };
     if (ratio <= 0.2 || (incident.priority === 'P1' && incident.status !== IncidentStatus.RESOLVED)) { level = 'HIGH'; reasons.push('little time remains for the resolution target'); }
     else if (ratio <= 0.45 || incident.status === IncidentStatus.WAITING_FOR_INFORMATION) { level = 'MODERATE'; reasons.push('the incident is partway through its resolution window'); }
     else reasons.push('sufficient resolution time remains');

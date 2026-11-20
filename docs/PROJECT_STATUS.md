@@ -8,7 +8,7 @@
 - User, technician, service, category, SLA and strategy administration. Incident filters, date/category reporting and CSV.
 - Academic report in Markdown, HTML and PDF. UML, ER, OOP explanation, requirements matrix, tests and demo script are included.
 
-## Verification
+## Earlier verification
 
 - Node: 42 passed, 0 failed, 0 skipped, including the original 30 tests.
 - Edge: Six checks passed, covering the original workflows and mobile checks plus administrator-owned verification and SLA filtering.
@@ -31,6 +31,13 @@
 - The account menu provides a read-only profile, role-specific user guide, About, confirmed sign-out, and local appearance preferences. It supports Light, Dark, and System themes, five accents, appearance reset, and reduced motion.
 - The orbital loader covers startup, successful sign-in, and administrator dashboard refresh. Startup failures offer a retry.
 - Node passed 42 tests and Edge passed 12 smoke groups. Responsive checks covered 320, 390, 768, 1120, and 1440 pixels. A two-process check reconfirmed persistence with an isolated SQLite file.
+
+## Phase 4
+
+- Smart Fix Suggestions ranks viewable resolved incidents using shared symptoms, phrases, service, category, and resolution wording. The incident's Related & knowledge tab explains each match and labels curated guidance when historical matches are unavailable.
+- SLA Rescue gives administrators a prioritized queue with response or resolution countdowns, an explanation for each risk, and suggested next steps. Manual reminders use the existing audit trail and both notification channels.
+- The local Hyderabad library photograph appears on sign-in and in the employee, technician, and administrator dashboard headings. The BITS wordmark uses stronger weight and accent color on the I and T, with all letters on the same baseline.
+- Phase 4 passed 53 backend tests, syntax checks, and 14 Edge smoke groups. A separate Node process reopened the isolated database and confirmed the historical match, SLA breach, and persisted reminder deduplication.
 
 ## Boundaries
 

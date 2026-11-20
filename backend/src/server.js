@@ -14,7 +14,7 @@ const frontendDirectory = path.join(projectRoot, 'frontend');
 
 const MIME = {
   '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8',
-  '.json': 'application/json; charset=utf-8', '.svg': 'image/svg+xml', '.png': 'image/png', '.jpeg': 'image/jpeg', '.ico': 'image/x-icon',
+  '.json': 'application/json; charset=utf-8', '.svg': 'image/svg+xml', '.png': 'image/png', '.jpeg': 'image/jpeg', '.jpg': 'image/jpeg', '.ico': 'image/x-icon',
 };
 
 const json = (response, status, payload) => {
@@ -155,6 +155,10 @@ export function createApplication({ databasePath = process.env.AEGIS_DATABASE_PA
       }
 
       if (method === 'GET' && pathname === '/api/sla/policies') return json(response, 200, { policies: listSlaPolicies(database) });
+      if (method === 'GET' && pathname === '/api/sla/rescue') return json(response, 200, services.incidentService.rescueQueue(actor));
+      if (method === 'POST' && parts[1] === 'sla' && parts[2] === 'rescue' && parts[4] === 'remind' && parts.length === 5) {
+        return json(response, 200, services.incidentService.remindForRescue(actor, routeId(parts, 3), body));
+      }
       if ((method === 'GET' || method === 'POST') && pathname === '/api/sla/monitor') { requireAdmin(actor); return json(response, 200, services.incidentService.monitorSla()); }
       if (method === 'GET' && pathname === '/api/sla/violations') {
         requireAdmin(actor);

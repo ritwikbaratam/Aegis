@@ -19,7 +19,7 @@ function icon(name) {
 }
 
 export function wordmark() {
-  return `<span class="bits-wordmark" role="img" aria-label="BITS"><span aria-hidden="true">B</span><span class="raised" aria-hidden="true">I</span><span class="raised" aria-hidden="true">T</span><span aria-hidden="true">S</span></span>`;
+  return `<span class="bits-wordmark" role="img" aria-label="BITS"><span aria-hidden="true">B</span><span class="emphasis" aria-hidden="true">I</span><span class="emphasis" aria-hidden="true">T</span><span aria-hidden="true">S</span></span>`;
 }
 
 function logo() {

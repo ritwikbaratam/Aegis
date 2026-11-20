@@ -250,4 +250,32 @@ export class IncidentRepository extends BaseRepository {
   byId(id) { return this.db.get('SELECT * FROM incidents WHERE id = :id OR incident_code = :id', { id: String(id) }); }
   nextSequence() { return Number(this.db.value('SELECT COUNT(*) + 1 AS next FROM incidents') ?? 1); }
   activeWorkload(technicianId) { return Number(this.db.value(`SELECT COUNT(*) FROM incidents WHERE assigned_technician_id = :technicianId AND status NOT IN ('RESOLVED','VERIFIED','CLOSED')`, { technicianId }) ?? 0); }
+
+  historicalFixes(incidentId, technicianId) {
+    return this.db.all(`SELECT i.id, i.title, i.description, i.resolution_description, i.category_id, i.service_id,
+        c.name AS category_name, s.name AS service_name
+      FROM incidents i LEFT JOIN categories c ON c.id=i.category_id JOIN it_services s ON s.id=i.service_id
+      WHERE i.status IN ('RESOLVED','VERIFIED','CLOSED') AND i.resolution_description IS NOT NULL
+        AND i.id<>:incidentId AND (:technicianId IS NULL OR i.assigned_technician_id=:technicianId)
+      ORDER BY i.resolved_at DESC, i.id DESC LIMIT 200`, { incidentId, technicianId });
+  }
+
+  activeForRescue() {
+    return this.db.all(`SELECT i.id, i.incident_code, i.title, i.status, i.priority, i.assigned_technician_id,
+        i.acknowledged_at, i.resolved_at, i.response_deadline, i.resolution_deadline,
+        i.response_minutes, i.resolution_minutes, i.response_breached, i.resolution_breached, i.escalation_level,
+        t.name AS technician_name, CASE WHEN t.role='TECHNICIAN' THEN t.active ELSE 0 END AS technician_active
+      FROM incidents i LEFT JOIN users t ON t.id=i.assigned_technician_id
+      WHERE i.status NOT IN ('RESOLVED','VERIFIED','CLOSED')`);
+  }
+
+  rescueReminders(incidentId = null) {
+    return this.db.all(`SELECT a.incident_id, json_extract(a.metadata, '$.target') AS target,
+        json_extract(a.metadata, '$.technicianId') AS technician_id
+      FROM audit_events a JOIN incidents i ON i.id=a.incident_id
+      WHERE a.action_type='SLA_RESCUE_REMINDER'
+        AND i.status NOT IN ('RESOLVED','VERIFIED','CLOSED')
+        AND i.assigned_technician_id=json_extract(a.metadata, '$.technicianId')
+        AND (:incidentId IS NULL OR a.incident_id=:incidentId)`, { incidentId });
+  }
 }

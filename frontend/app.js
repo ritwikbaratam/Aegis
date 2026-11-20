@@ -132,8 +132,8 @@ function metric(label, value, note, tone = 'teal') {
   return `<section class="card metric ${tone}"><div class="metric-label">${escapeHtml(label)}</div><div class="metric-value">${escapeHtml(value ?? '—')}</div><div class="metric-note">${escapeHtml(note || 'Live system data')}</div></section>`;
 }
 
-function pageHeader(title, subtitle, actions = '') {
-  return `<header class="page-header"><div><h1>${escapeHtml(title)}</h1>${subtitle ? `<p>${escapeHtml(subtitle)}</p>` : ''}</div>${actions ? `<div class="page-actions">${actions}</div>` : ''}</header>`;
+function pageHeader(title, subtitle, actions = '', style = '') {
+  return `<header class="page-header${style ? ` ${style}` : ''}"><div><h1>${escapeHtml(title)}</h1>${subtitle ? `<p>${escapeHtml(subtitle)}</p>` : ''}</div>${actions ? `<div class="page-actions">${actions}</div>` : ''}</header>`;
 }
 
 function avatar(person = state.user, admin = false) { return `<span class="avatar ${admin ? 'avatar-admin' : ''}" aria-hidden="true">${escapeHtml(initials(nameOf(person)))}</span>`; }
@@ -153,7 +153,7 @@ function navGroups() {
       ['All users', '/admin/users', 'users'], ['Technicians', '/admin/technicians', 'work'], ['IT services', '/admin/services', 'services'], ['Categories', '/admin/categories', 'categories'], ['SLA policies', '/admin/sla', 'policy'], ['Assignment strategy', '/admin/assignment', 'settings'],
     ]},
     { label: 'Command center', items: [
-      ['SLA monitor', '/sla-monitor', 'policy'], ['Escalations', '/admin/escalations', 'escalation'], ['Service Pulse', '/admin/service-pulse', 'pulse'], ['Audit history', '/admin/audit', 'audit'], ['Email outbox', '/admin/email-outbox', 'email'], ['Reports', '/reports', 'reports'],
+      ['SLA monitor', '/sla-monitor', 'policy'], ['SLA Rescue', '/admin/sla-rescue', 'escalation'], ['Escalations', '/admin/escalations', 'escalation'], ['Service Pulse', '/admin/service-pulse', 'pulse'], ['Audit history', '/admin/audit', 'audit'], ['Email outbox', '/admin/email-outbox', 'email'], ['Reports', '/reports', 'reports'],
     ]},
   );
   return common;
@@ -237,7 +237,12 @@ function optionList(items, selected = '', placeholder = 'Select an option') {
 }
 
 async function renderDashboard(version) {
-  root.innerHTML = shell(`${pageHeader('Command overview', roleSubtitle(), `<button class="button" data-action="reload">↻ Refresh</button>${isEmployee() ? '<a class="button primary" data-nav href="#/incidents/new">+ Report an incident</a>' : '<a class="button primary" data-nav href="#/incidents">Open incident queue</a>'}`)}${loading()}`, 'Dashboard');
+  const title = isEmployee() ? 'My support requests' : isTech() ? 'Technician workspace' : 'Command overview';
+  const actions = isEmployee() ? '<a class="button primary" data-nav href="#/incidents/new">Report an incident</a>'
+    : isTech() ? '<a class="button primary" data-nav href="#/workload">View workload</a>'
+    : '<button class="button" type="button" data-action="reload">Refresh</button><a class="button primary" data-nav href="#/incidents">Open incident queue</a>';
+  const heading = pageHeader(title, roleSubtitle(), actions, 'campus-dashboard');
+  root.innerHTML = shell(heading + loading(), 'Dashboard');
   try {
     const [overviewRaw, workloadRaw, trendsRaw, incidentsRaw, notificationsRaw] = await Promise.all([
       api('/reports/overview'), isEmployee() ? [] : api('/reports/workload'), api('/reports/trends').catch(() => []), api('/incidents?pageSize=8').catch(() => ({ items: [] })), api('/notifications'),
@@ -257,21 +262,19 @@ async function renderDashboard(version) {
     };
     const recent = listOf(overview.recentActivity || overview.activity || []).slice(0, 6);
     if (!isAdmin()) {
-      const title = isEmployee() ? 'My support requests' : 'Technician workspace';
-      const action = isEmployee() ? '<a class="button primary" href="#/incidents/new">Report an incident</a>' : '<a class="button primary" href="#/workload">View workload</a>';
       const metrics = isEmployee()
         ? [metric('Open requests', totals.active, 'Waiting for support'), metric('Awaiting verification', overview.byStatus?.find((row) => row.name === 'RESOLVED')?.value ?? 0, 'Ready for your review', 'amber'), metric('Closed requests', overview.closedIncidents, 'Completed requests', 'green')]
         : [metric('Assigned work', totals.active, 'Active incidents'), metric('Critical incidents', totals.critical, 'P1 incidents', 'red'), metric('Recorded SLA violations', totals.breached, 'Response or resolution targets missed', 'amber')];
-      root.innerHTML = shell(pageHeader(title, roleSubtitle(), action) + `
+      root.innerHTML = shell(heading + `
         <section class="metric-grid role-metrics">${metrics.join('')}</section>
         <section class="dashboard-grid"><section class="card"><div class="card-header"><h2>${isEmployee() ? 'My incidents' : 'My operational queue'}</h2></div>${incidentCompactList(incidents)}</section>
         <section class="card"><div class="card-header"><h2>${isEmployee() ? 'Recent activity' : 'My capacity'}</h2></div>${isEmployee() ? activityList(recent) : workloadList(workload.filter((row) => row.id === state.user.id))}</section></section>`, title);
       return;
     }
-    root.innerHTML = shell(`${pageHeader('Command overview', roleSubtitle(), `<button class="button" data-action="reload">↻ Refresh</button>${isEmployee() ? '<a class="button primary" data-nav href="#/incidents/new">+ Report an incident</a>' : '<a class="button primary" data-nav href="#/incidents">Open incident queue</a>'}`)}<section class="metric-grid">${metric('All incidents', totals.total, 'Persistent incident records', 'blue')}${metric('Active response', totals.active, 'Open lifecycle records', 'teal')}${metric('Critical priority', totals.critical, 'P1 incidents requiring attention', 'red')}${metric('SLA violations', totals.breached, 'Recorded, not projected', 'amber')}${metric('SLA compliance', percent(totals.compliance), 'Measured from live records', 'green')}</section><section class="dashboard-grid"><section class="card"><div class="card-header"><div><h2>Incident signal</h2><p>Recent incident distribution from the database</p></div><a data-nav href="#/reports" class="button small">View reports</a></div>${renderBars(trends, 'label', 'count')}</section><section class="card"><div class="card-header"><div><h2>Response health</h2><p>Live SLA compliance snapshot</p></div></div>${renderDonut(totals.compliance, overview)}</section></section><section class="dashboard-grid"><section class="card"><div class="card-header"><div><h2>${isTech() ? 'My operational queue' : isEmployee() ? 'Recent incidents' : 'Incident queue'}</h2><p>Current incident records</p></div><a data-nav href="#/incidents" class="button small">View all</a></div>${incidentCompactList(incidents)}</section><section class="card"><div class="card-header"><div><h2>${isAdmin() ? 'Technician workload' : 'Recent activity'}</h2><p>${isAdmin() ? 'Active workload by technician' : 'Changes recorded on your incidents'}</p></div></div>${isAdmin() ? workloadList(workload) : activityList(recent)}</section></section>`, 'Dashboard');
+    root.innerHTML = shell(heading + `<section class="metric-grid">${metric('All incidents', totals.total, 'Persistent incident records', 'blue')}${metric('Active response', totals.active, 'Open lifecycle records', 'teal')}${metric('Critical priority', totals.critical, 'P1 incidents requiring attention', 'red')}${metric('SLA violations', totals.breached, 'Recorded, not projected', 'amber')}${metric('SLA compliance', percent(totals.compliance), 'Measured from live records', 'green')}</section><section class="dashboard-grid"><section class="card"><div class="card-header"><div><h2>Incident signal</h2><p>Recent incident distribution from the database</p></div><a data-nav href="#/reports" class="button small">View reports</a></div>${renderBars(trends, 'label', 'count')}</section><section class="card"><div class="card-header"><div><h2>Response health</h2><p>Live SLA compliance snapshot</p></div></div>${renderDonut(totals.compliance, overview)}</section></section><section class="dashboard-grid"><section class="card"><div class="card-header"><div><h2>${isTech() ? 'My operational queue' : isEmployee() ? 'Recent incidents' : 'Incident queue'}</h2><p>Current incident records</p></div><a data-nav href="#/incidents" class="button small">View all</a></div>${incidentCompactList(incidents)}</section><section class="card"><div class="card-header"><div><h2>${isAdmin() ? 'Technician workload' : 'Recent activity'}</h2><p>${isAdmin() ? 'Active workload by technician' : 'Changes recorded on your incidents'}</p></div></div>${isAdmin() ? workloadList(workload) : activityList(recent)}</section></section>`, 'Dashboard');
   } catch (error) {
     if (version !== state.routeVersion) return;
-    root.innerHTML = shell(`${pageHeader('Command overview', roleSubtitle())}${messagePanel(error)}`, 'Dashboard');
+    root.innerHTML = shell(heading + messagePanel(error), 'Dashboard');
   }
 }
 
@@ -391,17 +394,21 @@ async function renderNewIncident(version) {
 async function renderIncidentDetail(id, version) {
   root.innerHTML = shell(`${pageHeader('Incident details', 'Loading the complete incident record…')}${loading()}`, 'Incident details');
   try {
-    const incidentRaw = await api(`/incidents/${encodeURIComponent(id)}`);
+    const endpoint = `/incidents/${encodeURIComponent(id)}`;
+    const incidentRaw = await api(endpoint);
     const incident = objectOf(incidentRaw?.incident || incidentRaw);
-    const [priorityRaw, assignmentRaw, relatedRaw, recommendationsRaw] = await Promise.all([
-      api(`/incidents/${encodeURIComponent(id)}/priority-explanation`).catch(() => incident.priorityExplanation || null),
-      api(`/incidents/${encodeURIComponent(id)}/assignment-explanation`).catch(() => incident.assignmentExplanation || null),
-      api(`/incidents/${encodeURIComponent(id)}/related`).catch(() => incident.related || []),
-      api(`/incidents/${encodeURIComponent(id)}/recommendations`).catch(() => incident.recommendations || []),
+    const activeTab = state.incidentTabs.get(String(idOf(incident))) || 'overview';
+    const [priorityRaw, assignmentRaw, relatedRaw, knowledge] = await Promise.all([
+      api(`${endpoint}/priority-explanation`).catch(() => incident.priorityExplanation || null),
+      api(`${endpoint}/assignment-explanation`).catch(() => incident.assignmentExplanation || null),
+      api(`${endpoint}/related`).catch(() => incident.related || []),
+      activeTab === 'related' && !isEmployee() ? api(`${endpoint}/recommendations`).catch((error) => ({ error })) : null,
     ]);
     if (version !== state.routeVersion) return;
-    const activeTab = state.incidentTabs.get(String(idOf(incident))) || 'overview';
-    root.innerHTML = shell(renderIncidentDetailMarkup(incident, { priority: objectOf(priorityRaw), assignment: objectOf(assignmentRaw), related: listOf(relatedRaw?.related || relatedRaw), recommendations: listOf(recommendationsRaw?.recommendations || recommendationsRaw), activeTab }), 'Incident details');
+    root.innerHTML = shell(renderIncidentDetailMarkup(incident, {
+      priority: objectOf(priorityRaw), assignment: objectOf(assignmentRaw),
+      related: listOf(relatedRaw?.related || relatedRaw), knowledge, activeTab,
+    }), 'Incident details');
     updateSlaClocks();
   } catch (error) {
     if (version !== state.routeVersion) return;
@@ -417,7 +424,7 @@ function renderIncidentDetailMarkup(incident, extra) {
   const comments = listOf(incident.comments || incident.conversation);
   const audits = listOf(incident.audit);
   const tab = extra.activeTab;
-  return `${pageHeader('Incident details', 'Status, assignment and activity', `<a class="button" data-nav href="#/incidents">← Incident register</a>${actions}`)}<section class="card incident-hero"><div class="incident-hero-top"><div><div class="incident-id">${escapeHtml(incident.incidentCode || id)}</div><h1>${escapeHtml(first(incident.title, 'Untitled incident'))}</h1><p class="incident-summary">${escapeHtml(first(incident.description, incident.summary, 'No description available.'))}</p></div><div class="incident-hero-actions">${badge(first(incident.priority, '—'))}${badge(status)}</div></div><div class="metadata-grid"><div class="meta"><div class="meta-label">Reporter</div><div class="meta-value">${escapeHtml(first(incident.reporter?.name, incident.reporterName, '—'))}</div></div><div class="meta"><div class="meta-label">Affected service</div><div class="meta-value">${escapeHtml(first(incident.service?.name, incident.serviceName, '—'))}</div></div><div class="meta"><div class="meta-label">Category</div><div class="meta-value">${escapeHtml(first(incident.category?.name, incident.categoryName, 'Uncategorised'))}</div></div><div class="meta"><div class="meta-label">Assigned technician</div><div class="meta-value">${escapeHtml(first(incident.assignee?.name, incident.assignedTechnician?.name, incident.assigneeName, 'Unassigned'))}</div></div><div class="meta"><div class="meta-label">Opened</div><div class="meta-value">${escapeHtml(dateTime(first(incident.createdAt, incident.createdOn)))}</div></div></div></section><section class="details-layout"><section class="card"><div class="tab-list" role="tablist" aria-label="Incident details"><button class="tab-button" role="tab" aria-selected="${tab === 'overview'}" data-action="incident-tab" data-tab="overview" data-incident-id="${escapeAttr(id)}">Overview</button><button class="tab-button" role="tab" aria-selected="${tab === 'work'}" data-action="incident-tab" data-tab="work" data-incident-id="${escapeAttr(id)}">Investigation</button><button class="tab-button" role="tab" aria-selected="${tab === 'activity'}" data-action="incident-tab" data-tab="activity" data-incident-id="${escapeAttr(id)}">Activity timeline</button><button class="tab-button" role="tab" aria-selected="${tab === 'related'}" data-action="incident-tab" data-tab="related" data-incident-id="${escapeAttr(id)}">Related &amp; knowledge</button></div><div class="tab-panel">${tab === 'overview' ? detailOverview(incident, extra) : tab === 'work' ? detailWork(incident, notes, comments) : tab === 'activity' ? detailActivity(audits) : detailRelated(extra.related, extra.recommendations)}</div></section><aside class="card"><div class="card-header"><div><h2>SLA command</h2><p>Calendar time, server timestamps</p></div></div>${slaPanel(incident)}<div class="card-header"><div><h2>Assignment</h2><p>Strategy decision record</p></div></div>${assignmentPanel(incident, extra.assignment)}</aside></section>`;
+  return `${pageHeader('Incident details', 'Status, assignment and activity', `<a class="button" data-nav href="#/incidents">← Incident register</a>${actions}`)}<section class="card incident-hero"><div class="incident-hero-top"><div><div class="incident-id">${escapeHtml(incident.incidentCode || id)}</div><h1>${escapeHtml(first(incident.title, 'Untitled incident'))}</h1><p class="incident-summary">${escapeHtml(first(incident.description, incident.summary, 'No description available.'))}</p></div><div class="incident-hero-actions">${badge(first(incident.priority, '—'))}${badge(status)}</div></div><div class="metadata-grid"><div class="meta"><div class="meta-label">Reporter</div><div class="meta-value">${escapeHtml(first(incident.reporter?.name, incident.reporterName, '—'))}</div></div><div class="meta"><div class="meta-label">Affected service</div><div class="meta-value">${escapeHtml(first(incident.service?.name, incident.serviceName, '—'))}</div></div><div class="meta"><div class="meta-label">Category</div><div class="meta-value">${escapeHtml(first(incident.category?.name, incident.categoryName, 'Uncategorised'))}</div></div><div class="meta"><div class="meta-label">Assigned technician</div><div class="meta-value">${escapeHtml(first(incident.assignee?.name, incident.assignedTechnician?.name, incident.assigneeName, 'Unassigned'))}</div></div><div class="meta"><div class="meta-label">Opened</div><div class="meta-value">${escapeHtml(dateTime(first(incident.createdAt, incident.createdOn)))}</div></div></div></section><section class="details-layout"><section class="card"><div class="tab-list" role="tablist" aria-label="Incident details"><button class="tab-button" role="tab" aria-selected="${tab === 'overview'}" data-action="incident-tab" data-tab="overview" data-incident-id="${escapeAttr(id)}">Overview</button><button class="tab-button" role="tab" aria-selected="${tab === 'work'}" data-action="incident-tab" data-tab="work" data-incident-id="${escapeAttr(id)}">Investigation</button><button class="tab-button" role="tab" aria-selected="${tab === 'activity'}" data-action="incident-tab" data-tab="activity" data-incident-id="${escapeAttr(id)}">Activity timeline</button><button class="tab-button" role="tab" aria-selected="${tab === 'related'}" data-action="incident-tab" data-tab="related" data-incident-id="${escapeAttr(id)}">Related &amp; knowledge</button></div><div class="tab-panel">${tab === 'overview' ? detailOverview(incident, extra) : tab === 'work' ? detailWork(incident, notes, comments) : tab === 'activity' ? detailActivity(audits) : detailRelated(extra.related, extra.knowledge)}</div></section><aside class="card"><div class="card-header"><div><h2>SLA command</h2><p>Calendar time, server timestamps</p></div></div>${slaPanel(incident)}<div class="card-header"><div><h2>Assignment</h2><p>Strategy decision record</p></div></div>${assignmentPanel(incident, extra.assignment)}</aside></section>`;
 }
 
 function incidentActionButtons(incident) {
@@ -457,8 +464,29 @@ function detailActivity(audits) {
   return `<section class="detail-section"><h3>Persistent audit timeline</h3><div class="timeline">${audits.map((event) => `<article class="timeline-item ${eventTone(event)}"><div class="timeline-title">${escapeHtml(first(event.description, event.actionType, event.action, 'Incident activity'))}</div><div class="timeline-meta">${escapeHtml(first(event.actorName, event.actor?.name, event.actorRole, 'System'))} · ${escapeHtml(dateTime(first(event.timestamp, event.createdAt)))}</div>${event.oldValue || event.newValue ? `<p class="timeline-description">${escapeHtml(`${first(event.oldValue, '—')} → ${first(event.newValue, '—')}`)}</p>` : ''}</article>`).join('')}</div></section>`;
 }
 
-function detailRelated(related, recommendations) {
-  return `<section class="detail-section"><h3>Potentially related incidents</h3>${related.length ? `<div class="list">${related.map((item) => `<a class="list-row" data-nav href="#/incidents/${encodeURIComponent(idOf(item))}"><span class="activity-icon">⌁</span><span class="list-row-content"><span class="list-row-title">${escapeHtml(first(item.title, idOf(item)))}</span><span class="list-row-meta">${escapeHtml(first(item.similarityScore != null ? `Similarity ${item.similarityScore}%` : null, item.similarityExplanation, item.reason, item.similarity ? `Similarity ${Math.round(Number(item.similarity) * 100)}%` : 'Related incident'))}</span></span>${badge(first(item.priority, item.status, 'Related'))}</a>`).join('')}</div>` : emptyState('No linked incidents', 'Potential matches appear here after a duplicate check.')}</section><section class="detail-section"><h3>Suggested historical resolutions</h3>${recommendations.length ? `<div class="list">${recommendations.map((item) => `<div class="list-row"><span class="activity-icon">✦</span><span class="list-row-content"><span class="list-row-title">${escapeHtml(first(item.incident?.title, item.title, item.incidentId, 'Resolved incident'))}</span><span class="list-row-meta">${escapeHtml(first(item.resolution, item.resolutionSummary, item.reason, item.description, 'A related historical resolution.'))}</span></span></div>`).join('')}</div>` : emptyState('No matching resolved incidents', 'Resolution suggestions appear only when the database has relevant, technician-reviewed history.')}</section>`;
+function detailRelated(related, knowledge) {
+  return `${knowledge ? smartFixes(knowledge) : ''}<section class="detail-section"><h3>Potentially related incidents</h3>${related.length ? `<div class="list">${related.map((item) => `<a class="list-row" data-nav href="#/incidents/${encodeURIComponent(idOf(item))}"><span class="activity-icon">⌁</span><span class="list-row-content"><span class="list-row-title">${escapeHtml(first(item.title, idOf(item)))}</span><span class="list-row-meta">${escapeHtml(first(item.similarityScore != null ? `Similarity ${item.similarityScore}%` : null, item.similarityExplanation, item.reason, item.similarity ? `Similarity ${Math.round(Number(item.similarity) * 100)}%` : 'Related incident'))}</span></span>${badge(first(item.priority, item.status, 'Related'))}</a>`).join('')}</div>` : emptyState('No linked incidents', 'Potential matches appear here after a duplicate check.')}</section>`;
+}
+
+function smartFixes({ recommendations = [], guidance, error }) {
+  let content;
+  if (error) content = messagePanel(error, false);
+  else if (recommendations.length) {
+    content = `<p class="inline-note">Advisory fixes from resolved incidents you can view. Scores measure similarity on a 0–100 scale.</p>
+      <div class="fix-list">${recommendations.map(({ incident, resolution, score, explanation }) => `
+        <article class="fix-card">
+          <div class="fix-header"><h4><a class="support-link" data-nav href="#/incidents/${encodeURIComponent(incident.id)}">${escapeHtml(incident.title)}</a></h4>
+            <span class="fix-score">Similarity ${escapeHtml(score)}/100</span></div>
+          <p class="fix-context">${escapeHtml([incident.service, incident.category].filter(Boolean).join(' · '))}</p>
+          <p class="fix-resolution">${escapeHtml(resolution)}</p>
+          <p class="fix-explanation"><strong>Why this matched</strong> ${escapeHtml(explanation)}</p>
+        </article>`).join('')}</div>`;
+  } else if (guidance) {
+    content = `<p class="inline-note">No sufficiently similar historical fixes were found.</p>
+      <article class="fix-card"><p class="fix-context">Curated guidance</p><h4>${escapeHtml(guidance.title)}</h4>
+        <ul>${guidance.steps.map((step) => `<li>${escapeHtml(step)}</li>`).join('')}</ul></article>`;
+  } else content = emptyState('No matching historical resolutions', 'A recommendation appears when relevant resolved incidents are available.');
+  return `<section class="detail-section smart-fixes"><h3>Smart Fix Suggestions</h3>${content}</section>`;
 }
 
 function slaPanel(incident) {
@@ -483,6 +511,8 @@ function slaPanel(incident) {
   </div>`;
 }
 
+const rescueRefreshInterval = 30_000;
+
 function updateSlaClocks() {
   for (const clock of document.querySelectorAll('[data-sla-end]')) {
     const end = Number(clock.dataset.slaEnd);
@@ -495,6 +525,28 @@ function updateSlaClocks() {
       const minutes = Math.floor(Math.abs(remaining) / 60_000);
       const seconds = Math.floor(Math.abs(remaining) / 1000) % 60;
       clock.textContent = `${minutes}m ${seconds}s ${remaining < 0 ? 'overdue' : 'left'}`;
+    }
+  }
+  const results = document.querySelector('#rescue-results');
+  if (results && state.rescueClock?.version === state.routeVersion) {
+    const { serverTime, received, refreshAt, version } = state.rescueClock;
+    const elapsed = performance.now() - received;
+    const now = serverTime + elapsed;
+    let crossedDeadline = false;
+    for (const clock of results.querySelectorAll('[data-rescue-deadline]')) {
+      const deadline = Number(clock.dataset.rescueDeadline);
+      const remaining = deadline - now;
+      crossedDeadline ||= deadline >= serverTime && remaining < 0;
+      const seconds = Math.ceil(Math.abs(remaining) / 1000);
+      const hours = Math.floor(seconds / 3600);
+      const minutes = Math.floor(seconds / 60) % 60;
+      const duration = hours ? `${hours}h ${minutes}m` : `${minutes}m ${seconds % 60}s`;
+      clock.textContent = `${duration} ${remaining < 0 ? 'overdue' : 'left'}`;
+    }
+    if ((elapsed >= refreshAt || (refreshAt === rescueRefreshInterval && crossedDeadline && elapsed >= 2_000))
+      && !results.contains(document.activeElement) && !results.querySelector('button:disabled')) {
+      state.rescueClock.refreshAt = Infinity;
+      renderSlaRescue(version, { background: true });
     }
   }
 }
@@ -611,6 +663,88 @@ async function renderSlaMonitor(version) {
     if (version !== state.routeVersion) return; const monitor = objectOf(monitorRaw); const violations = listOf(violationsRaw?.violations || violationsRaw); const policies = listOf(policiesRaw?.policies || policiesRaw);
     root.innerHTML = shell(`${pageHeader('SLA monitor', 'Real-time deadline status, early warnings, and persisted breach records.', '<button class="button" data-action="run-sla-monitor">Run monitor</button>')}<section class="metric-grid">${metric('Monitored active incidents', first(monitor.scanned, monitor.monitored, monitor.activeIncidents, 0), 'Latest server-side evaluation', 'blue')}${metric('Approaching deadline', first(monitor.warnings, monitor.warningCount, 0), 'Advance warning signals', 'amber')}${metric('Recorded breaches', first(monitor.breaches, monitor.breachCount, violations.length), 'No duplicate breach events', 'red')}${metric('Compliance', percent(first(monitor.complianceRate, monitor.compliance, '—')), 'Calculated from persisted state', 'green')}${metric('Policies', policies.length, 'Configurable priority targets', 'teal')}</section><section class="dashboard-grid equal"><section class="card"><div class="card-header"><div><h2>Priority policies</h2><p>Calendar time targets used in demo mode</p></div></div>${policies.length ? `<div class="list">${policies.map((policy) => `<div class="list-row"><span>${badge(first(policy.priority, policy.name, 'SLA'))}</span><span class="list-row-content"><span class="list-row-title">${escapeHtml(first(policy.name, `${policy.priority} response policy`))}</span><span class="list-row-meta">Response: ${escapeHtml(first(policy.responseTarget, policy.responseMinutes ? `${policy.responseMinutes} min` : '—'))} · Resolution: ${escapeHtml(first(policy.resolutionTarget, policy.resolutionMinutes ? `${policy.resolutionMinutes} min` : '—'))}</span></span></div>`).join('')}</div>` : emptyState('No policies found', 'An administrator must configure persisted SLA policies.')}</section><section class="card"><div class="card-header"><div><h2>SLA violation history</h2><p>Persisted violations only</p></div></div>${violations.length ? `<div class="list">${violations.map((violation) => `<div class="list-row"><span class="activity-icon critical">!</span><span class="list-row-content"><span class="list-row-title">${escapeHtml(first(violation.incidentCode, violation.incidentId, violation.incident?.id, 'Incident breach'))}</span><span class="list-row-meta">${escapeHtml(first(violation.type, violation.reason, 'SLA violation'))} · ${escapeHtml(dateTime(first(violation.detectedAt, violation.createdAt, violation.timestamp)))}</span></span></div>`).join('')}</div>` : emptyState('No violations returned', 'The monitor has not returned a persisted violation record.')}</section></section>`, 'SLA monitor');
   } catch (error) { if (version === state.routeVersion) root.innerHTML = shell(`${pageHeader('SLA monitor', 'Real-time deadline status and persisted breach records.')}${messagePanel(error)}`, 'SLA monitor'); }
+}
+
+const rescueLabels = {
+  OVERDUE: ['Overdue', 'breached'], BREACHED: ['SLA breached', 'breached'], CRITICAL: ['P1 attention', 'critical'],
+  APPROACHING: ['Approaching', 'warning'], UNASSIGNED: ['Needs assignment', 'warning'], ON_TRACK: ['On track', 'good'],
+};
+
+async function renderSlaRescue(version, { background = false } = {}) {
+  const previousClock = state.rescueClock;
+  const showAll = route().query.get('all') === '1';
+  const header = pageHeader('SLA Rescue', 'Review open incidents before a missed target becomes an escalation.',
+    '<button class="button" type="button" data-action="reload">Refresh risks</button><a class="button" data-nav href="#/sla-monitor">SLA monitor</a>');
+  if (!background) root.innerHTML = shell(header + '<div id="rescue-results">' + loading() + '</div>', 'SLA Rescue');
+  try {
+    const { evaluatedAt, items } = await api('/sla/rescue');
+    if (version !== state.routeVersion || (background && previousClock !== state.rescueClock)) return;
+    const results = document.querySelector('#rescue-results');
+    if (background && (results.contains(document.activeElement) || results.querySelector('button:disabled'))) {
+      state.rescueClock.refreshAt = performance.now() - state.rescueClock.received + 5_000;
+      return;
+    }
+    state.rescueClock = { serverTime: Date.parse(evaluatedAt), received: performance.now(), version, refreshAt: rescueRefreshInterval };
+    const attention = items.filter((item) => item.risk !== 'ON_TRACK');
+    const visible = showAll ? items : attention;
+    const filters = `<nav class="rescue-filters" aria-label="Rescue queue filter">
+      <a class="button small" data-nav href="#/admin/sla-rescue"${showAll ? '' : ' aria-current="page"'}>Needs attention (${attention.length})</a>
+      <a class="button small" data-nav href="#/admin/sla-rescue?all=1"${showAll ? ' aria-current="page"' : ''}>All active (${items.length})</a>
+    </nav>`;
+    results.innerHTML = `<div class="rescue-toolbar">${filters}
+      <p class="inline-note">Risks checked <time datetime="${escapeAttr(evaluatedAt)}">${escapeHtml(dateTime(evaluatedAt))}</time></p></div>
+      ${visible.length ? `<div class="rescue-list">${visible.map(rescueCard).join('')}</div>`
+        : `<section class="card">${showAll ? emptyState('No active incidents', 'The queue updates as new incidents are reported.')
+          : emptyState('No incidents need rescue', 'See all active incidents to review on-track targets.')}</section>`}`;
+    updateSlaClocks();
+  } catch (error) {
+    if (version !== state.routeVersion || (background && previousClock !== state.rescueClock)) return;
+    if (background) state.rescueClock.refreshAt = performance.now() - state.rescueClock.received + rescueRefreshInterval;
+    else document.querySelector('#rescue-results').innerHTML = messagePanel(error);
+  }
+}
+
+function rescueCard(item) {
+  const [label, tone] = rescueLabels[item.risk];
+  const technician = item.assignedTechnician;
+  return `<article class="card rescue-card" data-rescue-id="${escapeAttr(item.id)}">
+    <div class="rescue-incident"><p class="incident-id">${escapeHtml(item.incidentCode)}</p>
+      <h2><a class="support-link" data-nav href="#/incidents/${encodeURIComponent(item.id)}">${escapeHtml(item.title)}</a></h2>
+      <p class="fix-context">${escapeHtml(technician?.name ?? 'Unassigned')}</p></div>
+    <div class="rescue-deadline">
+      <div class="rescue-badges">${badge(item.priority)}${badge(label, tone)}</div>
+      <strong>${cap(item.deadlineKind)} deadline</strong>
+      <time datetime="${escapeAttr(item.deadline)}">${escapeHtml(dateTime(item.deadline))}</time>
+      <span class="rescue-countdown" data-rescue-deadline="${Date.parse(item.deadline)}"></span>
+    </div>
+    <div class="rescue-action"><p>${escapeHtml(item.reason)}</p>
+      <p><strong>Next step</strong> ${escapeHtml(item.suggestedAction)}</p>
+      ${item.canRemind ? `<button class="button small" type="button" data-action="rescue-reminder"
+        data-incident-id="${escapeAttr(item.id)}" data-target="${escapeAttr(item.deadlineKind)}" data-technician-id="${escapeAttr(technician.id)}">Notify technician</button>`
+        : item.reminderSent ? '<span class="reminder-state">Reminder sent</span>' : ''}
+    </div></article>`;
+}
+
+async function sendRescueReminder(button) {
+  const { incidentId, target, technicianId } = button.dataset;
+  const clock = state.rescueClock;
+  if (clock) state.rescueClock = { ...clock, refreshAt: performance.now() - clock.received + 5_000 };
+  button.disabled = true;
+  button.textContent = 'Sending…';
+  try {
+    const result = await api(`/sla/rescue/${encodeURIComponent(incidentId)}/remind`, {
+      method: 'POST', body: jsonBody({ target, technicianId: Number(technicianId) }),
+    });
+    const status = document.createElement('span');
+    status.className = 'reminder-state';
+    status.textContent = 'Reminder sent';
+    button.replaceWith(status);
+    toast(result.sent ? 'The assigned technician was notified.' : 'A reminder was already sent for this target.', 'success');
+  } catch (error) {
+    button.disabled = false;
+    button.textContent = 'Notify technician';
+    toast(error.message, 'error');
+  }
 }
 
 function reportFilters(query, categories) {
@@ -862,6 +996,7 @@ async function renderRoute() {
   if (path === '/admin/assignment') return renderAssignment(version);
   if (path === '/admin/sla') return renderSlaPolicies(version);
   if (path === '/sla-monitor') return renderSlaMonitor(version);
+  if (path === '/admin/sla-rescue') return renderSlaRescue(version);
   if (path === '/reports') return isAdmin() ? renderReports(version) : renderUnauthorized(version);
   if (path === '/admin/service-pulse') return renderServicePulse(version);
   if (ADMIN_PAGES[path]) return renderAdminTable(ADMIN_PAGES[path], version);
@@ -886,7 +1021,7 @@ function renderSupportPage(path) {
     ['Review your queue', 'Open an assigned incident. Acknowledge it, start investigation, and record your findings and resolution.', '/incidents?scope=assigned'],
     ['Check your workload', 'Review your capacity and open assignments.', '/workload'],
   ] : [
-    ['Review the SLA monitor', 'Check deadline risks and recorded violations for open incidents.', '/sla-monitor'],
+    ['Review SLA Rescue', 'Triage deadline risks and contact assigned technicians.', '/admin/sla-rescue'],
     ['Review reports', 'Filter incident activity and export the results.', '/reports'],
   ];
   steps.push(['Check notifications', 'Open an update to read it and follow its incident.', '/notifications']);
@@ -1022,6 +1157,7 @@ document.addEventListener('click', async (event) => {
   }
   if (action === 'edit-admin') { try { adminForm(target.dataset.resource, JSON.parse(target.dataset.item)); } catch { toast('Could not open this editor record.', 'error'); } return; }
   if (action === 'run-sla-monitor') { try { await api('/sla/monitor', { method: 'POST' }); toast('SLA monitor completed.', 'success'); } catch (error) { toast(error.message, 'error'); } return renderRoute(); }
+  if (action === 'rescue-reminder') return sendRescueReminder(target);
   if (action === 'download-csv') return exportCsv();
 });
 

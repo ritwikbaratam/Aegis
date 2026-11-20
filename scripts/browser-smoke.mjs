@@ -63,6 +63,9 @@ try {
   const entry = await newPage({ reducedMotion: 'no-preference', colorScheme: 'dark' });
   const emblem = await entry.request.get(url + '/assets/bits-logo.jpeg');
   assert.equal(emblem.headers()['content-type'], 'image/jpeg');
+  const photo = await entry.request.get(url + '/assets/bits-hyderabad.jpg');
+  assert.equal(photo.status(), 200);
+  assert.equal(photo.headers()['content-type'], 'image/jpeg');
   await entry.goto(url + '/');
   const entryLoader = entry.locator('.workspace-overlay');
   await entryLoader.getByText('Initializing workspace', { exact: true }).waitFor();
@@ -75,11 +78,24 @@ try {
   await entry.getByRole('heading', { name: 'Campus IT support' }).waitFor();
   assert.equal(await entry.locator('#app').evaluate(el => el.inert), false);
   assert.match(await entry.title(), /BITS IT Support/);
-  const wordmark = await entry.locator('.bits-wordmark > span').evaluateAll(letters => letters.map(el => el.getBoundingClientRect().top));
-  assert.ok(wordmark[1] < wordmark[0] && wordmark[2] < wordmark[3]);
+  const wordmark = await entry.locator('.bits-wordmark > span').evaluateAll((letters) => letters.map((el) => ({
+    text: el.textContent, weight: Number(getComputedStyle(el).fontWeight), color: getComputedStyle(el).color,
+    top: el.getBoundingClientRect().top,
+  })));
+  assert.equal(wordmark.map(({ text }) => text).join(''), 'BITS');
+  assert.ok(wordmark[1].weight > wordmark[0].weight && wordmark[2].weight > wordmark[3].weight);
+  assert.notEqual(wordmark[1].color, wordmark[0].color);
+  const tops = wordmark.map(({ top }) => top);
+  assert.ok(Math.max(...tops) - Math.min(...tops) <= 2);
+  assert.match(await entry.locator('.auth-shell').evaluate(el => getComputedStyle(el).backgroundImage), /bits-hyderabad.jpg/);
   await capture(entry, 'bits-login.png');
+  await entry.evaluate(() => window.bitsAppearance.set({ theme: 'light' }));
+  await capture(entry, 'bits-login-light.png');
+  await entry.setViewportSize({ width: 390, height: 850 });
+  assert.match(await entry.locator('.auth-intro').evaluate(el => getComputedStyle(el).backgroundImage), /bits-hyderabad.jpg/);
+  await capture(entry, 'bits-login-mobile-light.png');
   await entry.close();
-  console.log('PASS BITS branding, original JPEG and favicon, raised wordmark, and startup halo');
+  console.log('PASS BITS logo and favicon, weighted wordmark, campus photo, and startup halo');
 
   const employee = await newPage();
   await signIn(employee, 'employee@aegis.local', 'Employee@12345');
@@ -112,6 +128,7 @@ try {
 
   const tech = await newPage();
   await signIn(tech, 'jamie.apps@aegis.local', 'Technician@12345');
+  assert.match(await tech.locator('.campus-dashboard').evaluate(el => getComputedStyle(el).backgroundImage), /bits-hyderabad.jpg/);
   await tech.goto(detail);
   await perform(tech, 'acknowledge');
   await perform(tech, 'start-investigation');
@@ -136,6 +153,7 @@ try {
 
   const admin = await newPage();
   await signIn(admin, 'admin@aegis.local', 'Admin@12345');
+  assert.match(await admin.locator('.campus-dashboard').evaluate(el => getComputedStyle(el).backgroundImage), /bits-hyderabad.jpg/);
   await capture(admin, 'admin-dashboard.png');
   await admin.getByRole('button', { name: /Refresh/ }).click();
   await admin.locator('.workspace-overlay').getByText('Updating your dashboard', { exact: true }).waitFor();
@@ -269,6 +287,58 @@ try {
   await assertNoOverflow(admin, 'administrator reports at tablet width');
   console.log('PASS long titles, clickable incident rows, header spacing and responsive layouts at 1440/1120/768/390/320px');
 
+  const newPayment = createPaymentIncident('Payment application unavailable');
+  const jamieActor = auth.login('jamie.apps@aegis.local', 'Technician@12345').user;
+  if (newPayment.assignedTechnician.id !== jamieActor.id) {
+    incidentService.assign(reporter, newPayment.id, { technicianId: jamieActor.id, reason: 'Use technician-scoped payment history for the test.' });
+  }
+  await tech.goto(`${url}/#/incidents/${newPayment.id}`);
+  await tech.getByRole('tab', { name: 'Related & knowledge' }).click();
+  const historicalId = detail.split('/').at(-1);
+  const fix = tech.locator('.fix-card').filter({ has: tech.locator(`a[href="#/incidents/${historicalId}"]`) });
+  await fix.getByText(/Similarity \d+\/100/).waitFor();
+  await fix.getByText(/Restored the payment worker/).waitFor();
+  await fix.getByText(/Same affected IT service/).waitFor();
+  await fix.scrollIntoViewIfNeeded();
+  await capture(tech, 'bits-smart-fixes.png');
+  await tech.setViewportSize({ width: 320, height: 850 });
+  await assertNoOverflow(tech, 'Smart Fix suggestions at 320px');
+  await admin.goto(`${url}/#/incidents/${longReport.id}`);
+  await admin.getByRole('tab', { name: 'Related & knowledge' }).click();
+  await admin.getByRole('heading', { name: 'Network troubleshooting' }).waitFor();
+  await admin.getByText('Curated guidance', { exact: true }).waitFor();
+  console.log('PASS Smart Fix matches a real resolved incident and labels curated fallback');
+
+  await tech.goto(url + '/#/admin/sla-rescue');
+  await tech.getByRole('heading', { name: 'Access restricted' }).waitFor();
+  await admin.setViewportSize({ width: 1280, height: 900 });
+  await admin.locator('.sidebar').getByRole('link', { name: 'SLA Rescue', exact: true }).click();
+  const rescueCard = admin.locator(`[data-rescue-id="${newPayment.id}"]`);
+  await rescueCard.getByText('P1 Attention', { exact: true }).waitFor();
+  await rescueCard.getByText('Response deadline', { exact: true }).waitFor();
+  const actualDeadline = await rescueCard.locator('time').getAttribute('datetime');
+  assert.equal(actualDeadline, newPayment.sla.responseDeadline);
+  const countdown = rescueCard.locator('.rescue-countdown');
+  const initialCountdown = await countdown.textContent();
+  now = Date.parse(atRisk.sla.responseDeadline) + 1000;
+  await admin.waitForFunction(({ id, initial }) => document.querySelector(`[data-rescue-id="${id}"] .rescue-countdown`)?.textContent !== initial,
+    { id: newPayment.id, initial: initialCountdown });
+  await admin.locator(`[data-rescue-id="${atRisk.id}"]`).getByText('Overdue', { exact: true }).waitFor();
+  await capture(admin, 'bits-sla-rescue.png');
+  await rescueCard.getByRole('button', { name: 'Notify technician' }).click();
+  await rescueCard.getByText('Reminder sent', { exact: true }).waitFor();
+  await admin.getByRole('button', { name: 'Refresh risks' }).click();
+  await rescueCard.getByText('Reminder sent', { exact: true }).waitFor();
+  await tech.goto(url + '/#/notifications');
+  await tech.getByText(`${newPayment.incidentCode} needs an SLA update`, { exact: true }).waitFor();
+  await admin.getByRole('link', { name: /All active/ }).click();
+  await admin.getByText('On Track', { exact: true }).first().waitFor();
+  await admin.setViewportSize({ width: 320, height: 850 });
+  await assertNoOverflow(admin, 'SLA Rescue at 320px');
+  await admin.evaluate(() => window.bitsAppearance.set({ theme: 'light' }));
+  await capture(admin, 'bits-sla-rescue-mobile.png');
+  console.log('PASS SLA Rescue authorization, snapshot deadline, countdown, reminders and mobile queue');
+
   await employee.goto(url + '/#/dashboard');
   await employee.locator('.metric').first().waitFor();
   const trigger = employee.getByRole('button', { name: 'Account and settings' });
@@ -320,6 +390,7 @@ try {
   await trigger.click();
   await panel.getByRole('button', { name: 'Light', exact: true }).click();
   const lightColor = await employee.locator('body').evaluate(el => getComputedStyle(el).color);
+  assert.match(await employee.locator('.campus-dashboard').evaluate(el => getComputedStyle(el).backgroundImage), /bits-hyderabad.jpg/);
   await trigger.click();
   await capture(employee, 'bits-account-light.png');
   await employee.reload();
